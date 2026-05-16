@@ -240,11 +240,11 @@ python scripts/run_eval_local.py --policy rule --split test
 # 训练入口：默认使用本地模型路径 models/qwen2_5_0_5b_instruct
 python scripts/run_train_local.py --local-model-path models/qwen2_5_0_5b_instruct
 
-# 单卡真实训练 smoke：仍然使用导出的 slime JSONL，但用 Transformers 跑少量 SFT step
+# 单卡真实训练 smoke：仍然使用导出的 slime JSONL，但用 Transformers 跑少量 SFT step；默认 float32 更稳
 python scripts/run_train_local.py --backend hf-smoke --local-model-path C:\path\to\local\checkpoint --output-dir checkpoints\context_policy_hf_sft_smoke
 ```
 
-`hf-smoke` 用来验证本地 checkpoint、CUDA、导出的 slime JSONL、response-token loss 是否能在单卡上真实跑通。完整 slime/Ray/Megatron 训练仍然是生产路径；如果当前安装的 slime 包没有 `python -m slime` 入口，先用 `hf-smoke` 做 3090 单卡训练闭环，再把 `opd.generate_rollout_opd` 接到机器上的 slime 集群启动脚本。
+`hf-smoke` 用来验证本地 checkpoint、CUDA、导出的 slime JSONL、response-token loss 是否能在单卡上真实跑通。完整 slime/Ray/Megatron 训练仍然是生产路径；如果当前安装的 slime 包没有 `python -m slime` 入口，先用 `hf-smoke` 做 3090 单卡训练闭环，再把 `opd.generate_rollout_opd` 接到机器上的 slime 集群启动脚本。训练 smoke 遇到非有限 loss 会直接失败。
 
 HF 模型导入也走本地路径。默认不联网下载，只登记你机器上已有的本地 checkpoint：
 

@@ -61,7 +61,7 @@ python scripts/import_hf_model.py --source-local-path C:\path\to\local\checkpoin
 # slime SFT command generation using local model path
 python scripts/run_train_local.py --local-model-path models/qwen2_5_0_5b_instruct
 
-# real single-GPU HF SFT smoke train using the same slime JSONL
+# real single-GPU HF SFT smoke train using the same slime JSONL; default dtype is float32 for stability
 python scripts/run_train_local.py --backend hf-smoke --local-model-path C:\path\to\local\checkpoint --output-dir checkpoints\context_policy_hf_sft_smoke
 ```
 
@@ -70,7 +70,7 @@ CUDA runtime, exported slime JSONL, and response-token loss on one GPU. The full
 slime/Ray/Megatron launcher remains the target production path; if your installed
 slime package does not provide a `python -m slime` entrypoint, use `hf-smoke` for
 the single-card training smoke and wire `opd.generate_rollout_opd` into the
-cluster-specific slime launch script.
+cluster-specific slime launch script. Non-finite losses fail the smoke run.
 
 For real HotpotQA data:
 

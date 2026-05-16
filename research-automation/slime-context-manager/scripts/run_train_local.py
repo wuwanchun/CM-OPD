@@ -26,6 +26,7 @@ def main() -> None:
     parser.add_argument("--output-dir", default=str(ROOT / "checkpoints" / "context_policy_sft"))
     parser.add_argument("--backend", choices=["slime", "hf-smoke"], default="slime")
     parser.add_argument("--max-steps", type=int, default=5, help="Only used by --backend hf-smoke.")
+    parser.add_argument("--dtype", choices=["float32", "float16", "bfloat16", "auto"], default="float32")
     parser.add_argument("--save-model", action="store_true", help="Only used by --backend hf-smoke.")
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args()
@@ -64,6 +65,8 @@ def main() -> None:
             args.output_dir,
             "--max-steps",
             str(args.max_steps),
+            "--dtype",
+            args.dtype,
         ]
         if args.save_model:
             train_cmd.append("--save-model")
