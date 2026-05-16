@@ -1,0 +1,10 @@
+dataset: hotpotqa
+hf_name: hotpotqa/hotpot_qa
+hf_config: distractor
+max_samples_per_split: 200
+output_dir: data/processed/context_actions
+splits:
+  train: train
+  validation: validation
+  test: validation
+  unseen: validation

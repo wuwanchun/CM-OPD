@@ -1,0 +1,75 @@
+project:
+  name: "context-compression-research-workflow"
+  source_report: "C:\\Users\\admin\\Downloads\\deep-research-report.md"
+  primary_goal: "Build a code-aware, evidence-preserving context compression layer for coding agents."
+
+research_questions:
+  - id: rq1
+    question: "Which compression object should be prioritized for coding agents: code blocks, dialogue history, tool outputs, or indexed memory?"
+  - id: rq2
+    question: "Can an independent code-aware compressor reduce context tokens without hurting task success?"
+  - id: rq3
+    question: "When does indexed evidence memory outperform summary-only compression?"
+  - id: rq4
+    question: "What evidence is needed before upgrading to RL-based context management?"
+
+phases:
+  - id: phase_0
+    name: "Problem framing"
+    exit_criteria:
+      - "Compression target and context budget are defined."
+      - "Initial benchmark list is fixed."
+  - id: phase_1
+    name: "Literature and evidence tracking"
+    exit_criteria:
+      - "At least 10 paper cards are completed."
+      - "Each paper has method tags and reproducibility notes."
+  - id: phase_2
+    name: "Independent compressor prototype"
+    exit_criteria:
+      - "Compression ratio improves by at least 30%."
+      - "Task success keeps at least 95% of no-compression baseline."
+  - id: phase_3
+    name: "Indexed evidence memory"
+    exit_criteria:
+      - "Every compressed segment has a retrievable source pointer."
+      - "Evidence recall is measured on failed and successful runs."
+  - id: phase_4
+    name: "RL context manager decision"
+    exit_criteria:
+      - "A clear go/no-go decision is documented with metrics."
+
+method_tags:
+  - code-aware
+  - extractive
+  - reranking
+  - summary-folding
+  - indexed-memory
+  - soft-compression
+  - rl-policy
+  - benchmark
+
+evaluation_metrics:
+  compression_ratio: "original_tokens / compressed_tokens"
+  task_success_rate: "successful_tasks / total_tasks"
+  evidence_recall: "retrieved_required_evidence / required_evidence"
+  symbol_recall: "preserved_required_symbols / required_symbols"
+  latency_delta: "compressed_pipeline_latency - baseline_latency"
+  cost_delta: "compressed_pipeline_cost - baseline_cost"
+  failure_attribution: "compression_loss | retrieval_miss | reasoning_error | benchmark_issue | infra_issue"
+
+benchmarks:
+  first_wave:
+    - "LongCodeZip-style code completion / code QA / code summarization tasks"
+    - "Synthetic repo slicing tasks with known relevant files and symbols"
+  second_wave:
+    - "LoCoEval-style repo conversation tasks"
+    - "SWE-style patch tasks with long dialogue history"
+  later_wave:
+    - "ContextBudget / Context-Folding style long-horizon tool-use tasks"
+
+weekly_cadence:
+  monday: "Update papers, select one backlog task."
+  tuesday_to_thursday: "Run prototype or reproduction experiment."
+  friday: "Write eval report, update decisions and backlog."
+

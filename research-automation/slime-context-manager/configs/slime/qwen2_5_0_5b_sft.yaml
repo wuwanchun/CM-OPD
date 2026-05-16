@@ -1,0 +1,10 @@
+hf_checkpoint: Qwen/Qwen2.5-0.5B-Instruct
+train_jsonl: data/slime/context_actions_train.jsonl
+eval_jsonl: data/slime/context_actions_validation.jsonl
+output_dir: checkpoints/qwen2_5_0_5b_context_policy_sft
+input_key: prompt
+label_key: label
+metadata_key: metadata
+rollout_function_path: opd.opd_rollout.generate_rollout_opd
+custom_rm_path: opd.opd_rollout.custom_rm
+notes: "Use as command source for slime SFT. Adjust GPU and Megatron options on the training host."

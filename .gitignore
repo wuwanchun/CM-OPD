@@ -1,0 +1,25 @@
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Local environments
+.venv/
+venv/
+env/
+
+# Large model/training artifacts
+models/
+checkpoints/
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# Optional downloaded benchmark caches
+research-automation/slime-context-manager/data/raw/hotpotqa_*.jsonl
+research-automation/slime-context-manager/data/processed/**/hf_dataset/
+
+# Local logs
+*.log
