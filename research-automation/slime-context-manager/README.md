@@ -16,7 +16,7 @@ student memory action
 
 The main agent is not trained here. Only the external context manager policy is the training target.
 
-## Quick Smoke Test
+## Quick Local Checks
 
 ```powershell
 python -m unittest discover -s research-automation/slime-context-manager/tests -v
@@ -78,6 +78,14 @@ For real HotpotQA data:
 python scripts/download_datasets.py --dataset hotpotqa --max-samples 200
 python scripts/build_context_action_dataset.py --adapter hotpotqa --limit 500 --save-hf-dataset
 ```
+
+For FASD-GRPO / CodeHER-GRPO, the primary test path reads directly from a Hugging Face dataset:
+
+```powershell
+python scripts/run_fasd_grpo_hf_dataset.py --dataset hotpotqa/hotpot_qa --config distractor --split validation --max-rows 8 --k-rollouts 4
+```
+
+This writes grouped rollout records, segment records, and FASD-GRPO samples under `data/grpo_sdft_hf/`.
 
 ## OPD Modes
 

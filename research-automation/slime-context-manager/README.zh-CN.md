@@ -199,6 +199,18 @@ python scripts/download_datasets.py --dataset hotpotqa --max-samples 200
 python scripts/build_context_action_dataset.py --adapter hotpotqa --limit 500 --save-hf-dataset
 ```
 
+FASD-GRPO / CodeHER-GRPO 的主测试入口直接读取 HuggingFace 数据集，不再以 toy/smoke 作为验收口径：
+
+```powershell
+python scripts/run_fasd_grpo_hf_dataset.py --dataset hotpotqa/hotpot_qa --config distractor --split validation --max-rows 8 --k-rollouts 4
+```
+
+输出包括 grouped rollout records、segment records 和 FASD-GRPO samples，默认写入：
+
+```text
+data/grpo_sdft_hf/
+```
+
 导出 slime 训练数据：
 
 ```powershell
