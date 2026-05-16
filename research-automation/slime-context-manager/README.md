@@ -87,6 +87,16 @@ python scripts/run_fasd_grpo_hf_dataset.py --dataset hotpotqa/hotpot_qa --config
 
 This writes grouped rollout records, segment records, and FASD-GRPO samples under `data/grpo_sdft_hf/`.
 
+For async SDFT from failed trajectories:
+
+```powershell
+python scripts/run_sdft_async_hf_dataset.py --dataset hotpotqa/hotpot_qa --config distractor --split validation --max-rows 8 --k-rollouts 4
+```
+
+This path filters failed trajectory actions, extracts hindsight hints with an
+`asyncio` hint extractor, writes corrected SDFT samples, and validates a
+slime-compatible SDFT rollout batch.
+
 ## OPD Modes
 
 | Mode | Status | Description |

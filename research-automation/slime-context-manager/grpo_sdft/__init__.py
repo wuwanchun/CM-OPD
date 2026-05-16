@@ -9,6 +9,8 @@ from .trajectory_schema import (
     SegmentRecord,
     TrajectoryAction,
 )
+from .sdft_hint_extractor import SDFTHint
+from .sdft_sample_builder import SDFTTrainingSample
 
 __all__ = [
     "ACTION_TYPES",
@@ -17,5 +19,7 @@ __all__ = [
     "LossMasks",
     "RolloutRecord",
     "SegmentRecord",
+    "SDFTHint",
+    "SDFTTrainingSample",
     "TrajectoryAction",
 ]

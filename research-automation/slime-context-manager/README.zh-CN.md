@@ -211,6 +211,14 @@ python scripts/run_fasd_grpo_hf_dataset.py --dataset hotpotqa/hotpot_qa --config
 data/grpo_sdft_hf/
 ```
 
+失败轨迹的异步 SDFT 入口：
+
+```powershell
+python scripts/run_sdft_async_hf_dataset.py --dataset hotpotqa/hotpot_qa --config distractor --split validation --max-rows 8 --k-rollouts 4
+```
+
+这条链路会筛选失败 trajectory actions，用 `asyncio` 并发提取 hindsight hints，生成 corrected SDFT samples，并验证 slime-compatible SDFT rollout batch。
+
 导出 slime 训练数据：
 
 ```powershell

@@ -184,6 +184,19 @@ python scripts/run_fasd_grpo_hf_dataset.py \
   --k-rollouts 4
 ```
 
+异步 SDFT 入口是：
+
+```bash
+python scripts/run_sdft_async_hf_dataset.py \
+  --dataset hotpotqa/hotpot_qa \
+  --config distractor \
+  --split validation \
+  --max-rows 8 \
+  --k-rollouts 4
+```
+
+该入口只消费失败轨迹：`failed trajectory -> async hint extraction -> corrected SDFT sample -> slime-compatible rollout group`。
+
 未来 slime 接口：
 
 ```text
