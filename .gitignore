@@ -5,6 +5,7 @@ __pycache__/
 .ruff_cache/
 
 # Local environments
+.codex_tmp/
 .venv/
 venv/
 env/
