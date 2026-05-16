@@ -101,7 +101,9 @@ def main() -> None:
     (output_dir / "training_metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     tokenizer.save_pretrained(output_dir / "tokenizer")
     if args.save_model:
-        model.save_pretrained(output_dir / "model")
+        model_dir = output_dir / "model"
+        model.save_pretrained(model_dir)
+        tokenizer.save_pretrained(model_dir)
     print(json.dumps(metrics, ensure_ascii=False, indent=2))
 
 
