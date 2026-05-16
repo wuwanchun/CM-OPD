@@ -82,6 +82,17 @@ class GRPOSDFTComponentTests(unittest.TestCase):
         self.assertTrue(action.loss_masks.replay)
         self.assertTrue(action.loss_masks.sdft)
 
+    def test_replay_compares_json_action_name_not_reason(self):
+        action = make_action(
+            0,
+            reward=1.0,
+            failure_type="none",
+            student='{"action":"ARCHIVE","target_ids":["mem"],"reason":"student"}',
+            teacher='{"action":"ARCHIVE","target_ids":["mem"],"reason":"teacher"}',
+        )
+        apply_hindsight_masks([action])
+        self.assertTrue(action.loss_masks.replay)
+
     def test_training_sample_preserves_masks_and_rewards(self):
         action = make_action(0, reward=1.0)
         assign_segment_and_action_rewards([action])

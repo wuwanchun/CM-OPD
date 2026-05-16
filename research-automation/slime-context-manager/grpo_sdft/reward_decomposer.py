@@ -6,6 +6,8 @@ import math
 from collections import defaultdict
 from typing import Any
 
+from opd.action_parser import parse_memory_action
+
 from .trajectory_schema import RolloutRecord, TrajectoryAction
 
 
@@ -66,10 +68,18 @@ async def custom_rm(_: Any, sample_or_samples: Any, **__: Any) -> Any:
 
 
 def _default_action_reward(action: TrajectoryAction) -> float:
-    if action.failure_type == "none" and action.teacher_action and action.teacher_action == action.student_action:
+    if action.failure_type == "none" and action.teacher_action and _same_action_name(action.student_action, action.teacher_action):
         return 1.0
     if action.failure_type != "none" and action.teacher_action and action.teacher_action != action.student_action:
         return -1.0
     if action.failure_type == "format_error":
         return -1.0
     return 0.0
+
+
+def _same_action_name(left: str, right: str) -> bool:
+    left_parsed = parse_memory_action(left)
+    right_parsed = parse_memory_action(right)
+    if left_parsed.valid and right_parsed.valid:
+        return left_parsed.action == right_parsed.action
+    return left == right

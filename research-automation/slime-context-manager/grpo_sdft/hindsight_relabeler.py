@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from opd.action_parser import parse_memory_action
+
 from .trajectory_schema import LossMasks, TrajectoryAction
 
 
@@ -38,7 +40,7 @@ def apply_hindsight_masks(
             min_confidence=min_confidence,
             require_raw_evidence=require_raw_evidence,
         )
-        replay = action.failure_type == "none" and action.teacher_action == action.student_action and action.confidence >= min_confidence
+        replay = action.failure_type == "none" and _same_action_name(action.student_action, action.teacher_action) and action.confidence >= min_confidence
         action.loss_masks = LossMasks(grpo=True, sdft=accept, replay=replay)
     return actions
 
@@ -47,3 +49,11 @@ def correction_target(action: TrajectoryAction) -> str:
     """Return the action target used by SDFT; fallback to student action for replay."""
 
     return action.teacher_action or action.student_action
+
+
+def _same_action_name(left: str, right: str) -> bool:
+    left_parsed = parse_memory_action(left)
+    right_parsed = parse_memory_action(right)
+    if left_parsed.valid and right_parsed.valid:
+        return left_parsed.action == right_parsed.action
+    return left == right
