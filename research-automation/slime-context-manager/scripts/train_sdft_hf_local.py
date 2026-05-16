@@ -22,7 +22,7 @@ def main() -> None:
     parser.add_argument("--max-steps", type=int, default=20)
     parser.add_argument("--max-length", type=int, default=1024)
     parser.add_argument("--learning-rate", type=float, default=1e-5)
-    parser.add_argument("--dtype", choices=["float32", "float16", "bfloat16", "auto"], default="float16")
+    parser.add_argument("--dtype", choices=["float32", "float16", "bfloat16", "auto"], default="float32")
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
     parser.add_argument("--save-model", action="store_true")
     args = parser.parse_args()

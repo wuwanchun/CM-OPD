@@ -100,11 +100,12 @@ slime-compatible SDFT rollout batch.
 Run local single-GPU SDFT on the generated corrected-action data:
 
 ```powershell
-python scripts/train_sdft_hf_local.py --model-path C:\path\to\local\checkpoint --train-jsonl data\sdft_async_hf\sdft_slime_sft_validation.jsonl --output-dir checkpoints\context_policy_sdft --max-steps 16 --dtype float16
+python scripts/train_sdft_hf_local.py --model-path C:\path\to\local\checkpoint --train-jsonl data\sdft_async_hf\sdft_slime_sft_validation.jsonl --output-dir checkpoints\context_policy_sdft --max-steps 16 --dtype float32
 ```
 
 This trainer optimizes only response tokens for the corrected memory/tool
-action. It is useful when the installed slime package exposes rollout modules
+action. The default dtype is `float32` for stability on small single-GPU runs.
+It is useful when the installed slime package exposes rollout modules
 but no generic `python -m slime` training entrypoint.
 
 ## OPD Modes

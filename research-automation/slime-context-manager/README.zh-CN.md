@@ -222,10 +222,10 @@ python scripts/run_sdft_async_hf_dataset.py --dataset hotpotqa/hotpot_qa --confi
 基于生成的 corrected-action 数据，在单卡上实际跑 SDFT 训练：
 
 ```powershell
-python scripts/train_sdft_hf_local.py --model-path C:\path\to\local\checkpoint --train-jsonl data\sdft_async_hf\sdft_slime_sft_validation.jsonl --output-dir checkpoints\context_policy_sdft --max-steps 16 --dtype float16
+python scripts/train_sdft_hf_local.py --model-path C:\path\to\local\checkpoint --train-jsonl data\sdft_async_hf\sdft_slime_sft_validation.jsonl --output-dir checkpoints\context_policy_sdft --max-steps 16 --dtype float32
 ```
 
-这个训练脚本只对 corrected memory/tool action 的 response tokens 计算 loss。当前机器上的 slime 包如果只有 rollout 模块、没有通用 `python -m slime` 训练入口，可以先用这个入口完成本地 SDFT 训练闭环，再把 `grpo_sdft.async_sdft_rollout.generate_rollout_sdft` 接到机器上的 slime launcher。
+这个训练脚本只对 corrected memory/tool action 的 response tokens 计算 loss，默认用 `float32` 保证单卡小规模训练稳定。当前机器上的 slime 包如果只有 rollout 模块、没有通用 `python -m slime` 训练入口，可以先用这个入口完成本地 SDFT 训练闭环，再把 `grpo_sdft.async_sdft_rollout.generate_rollout_sdft` 接到机器上的 slime launcher。
 
 导出 slime 训练数据：
 
