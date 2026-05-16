@@ -1,0 +1,23 @@
+{
+  "num_samples": 5,
+  "action_accuracy": 1.0,
+  "macro_f1": 0.5714285714285714,
+  "invalid_output_rate": 0.0,
+  "forbidden_action_rate": 0.0,
+  "must_preserve_violation_rate": 0.0,
+  "evidence_recall": 1.0,
+  "confusion": {
+    "PIN": {
+      "PIN": 1
+    },
+    "KEEP": {
+      "KEEP": 2
+    },
+    "COMPRESS": {
+      "COMPRESS": 1
+    },
+    "ARCHIVE": {
+      "ARCHIVE": 1
+    }
+  }
+}

@@ -46,6 +46,22 @@ python scripts/visualize_results.py --metrics runs/metrics.json --output-dir run
 python scripts/train_sft_slime.py --train-jsonl data/slime/context_actions_train.jsonl
 ```
 
+Practical launchers using local paths:
+
+```powershell
+# evaluation
+python scripts/run_eval_local.py --policy rule --split test
+
+# register an existing local HF checkpoint
+python scripts/import_hf_model.py --source-local-path C:\path\to\local\checkpoint --local-dir models/qwen2_5_0_5b_instruct
+
+# optionally copy the local checkpoint into the project model directory
+python scripts/import_hf_model.py --source-local-path C:\path\to\local\checkpoint --local-dir models/qwen2_5_0_5b_instruct --copy
+
+# slime SFT command generation using local model path
+python scripts/run_train_local.py --local-model-path models/qwen2_5_0_5b_instruct
+```
+
 For real HotpotQA data:
 
 ```powershell

@@ -208,7 +208,7 @@ python scripts/export_slime_jsonl.py --split train
 HF 模型导入 dry run：
 
 ```powershell
-python scripts/import_hf_model.py --model Qwen/Qwen2.5-0.5B-Instruct --dry-run
+python scripts/import_hf_model.py --source-local-path C:\path\to\local\checkpoint --local-dir models/qwen2_5_0_5b_instruct --dry-run
 ```
 
 部署 rule policy：
@@ -231,6 +231,35 @@ python scripts/visualize_results.py --metrics runs/metrics.json --output-dir run
 python scripts/train_sft_slime.py --train-jsonl data/slime/context_actions_train.jsonl
 ```
 
+实际启动入口推荐用这两个脚本：
+
+```powershell
+# 评测入口：默认使用本地数据路径，输出到 runs/eval_local
+python scripts/run_eval_local.py --policy rule --split test
+
+# 训练入口：默认使用本地模型路径 models/qwen2_5_0_5b_instruct
+python scripts/run_train_local.py --local-model-path models/qwen2_5_0_5b_instruct
+```
+
+HF 模型导入也走本地路径。默认不联网下载，只登记你机器上已有的本地 checkpoint：
+
+```powershell
+python scripts/import_hf_model.py --source-local-path C:\path\to\local\checkpoint --local-dir models/qwen2_5_0_5b_instruct
+```
+
+如果你希望复制一份到项目目录，再加 `--copy`：
+
+```powershell
+python scripts/import_hf_model.py --source-local-path C:\path\to\local\checkpoint --local-dir models/qwen2_5_0_5b_instruct --copy
+```
+
+如果训练机已经有本地 checkpoint，可以直接传：
+
+```powershell
+python scripts/run_train_local.py --local-model-path C:\path\to\local\checkpoint
+python scripts/run_eval_local.py --policy model --model-path C:\path\to\local\checkpoint
+```
+
 ## 依赖文件
 
 | 文件 | 用途 |
@@ -249,7 +278,7 @@ python scripts/train_sft_slime.py --train-jsonl data/slime/context_actions_train
 - Token OPD / Top-K OPD 扩展接口
 - GRPO 过程奖励字段预留
 - toy / HotpotQA 数据处理入口
-- HF 模型导入 dry run 和模型 policy wrapper
+- 本地 HF checkpoint 登记/复制和模型 policy wrapper
 - rule policy 部署与推理脚本
 - slime JSONL 导出与训练命令生成
 - metrics 评测和 SVG/Markdown 可视化分析
