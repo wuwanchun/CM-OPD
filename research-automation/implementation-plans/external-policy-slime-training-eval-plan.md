@@ -1,73 +1,224 @@
-# External Policy Slime Training And Evaluation Plan
+# Progressive Evidence Disclosure Training And Evaluation Plan
 
-_Implementation plan for the external context-manager policy, with OpenClaw-RL style OPD self-training hooks._
+_Implementation plan for the lightweight summary-to-raw expansion policy. OPD, token distillation, and GRPO hooks are optional extensions; the first runnable path is supervised training of a progressive disclosure policy._
 
 ---
 
+For the build-order roadmap, see:
+
+```text
+research-automation/implementation-plans/progressive-disclosure-slime-roadmap.md
+```
+
 ## 1. Goal
 
-This implementation targets the external policy version of the project. The main agent remains frozen. The trainable component is a lightweight context manager that chooses memory lifecycle actions:
+The main model and retriever remain frozen. The trainable component is a lightweight policy that decides how each candidate span should be disclosed under a fixed token budget:
 
 ```text
-KEEP / COMPRESS / ARCHIVE / RETRIEVE / UPDATE / DROP / PIN
+HIDE
+KEEP_SUMMARY
+EXPAND_TO_RAW
 ```
 
-The first runnable path is `Action OPD`: collect context-policy actions, wait for next-state feedback, extract hindsight hints, and train on corrected memory actions. `Token OPD` and `Top-K OPD` are implemented as compatible extension points for slime, but GRPO is not executed in the first version.
-
-## 2. OPD Self-Training For External Context Policy
-
-The OPD path follows the OpenClaw-RL pattern, adapted from full agent responses to external memory actions:
+Research object:
 
 ```text
-context state s_t
--> current external policy outputs memory action a_t
--> store prompt_ids, response_ids, rollout_log_probs, memory_id, turn_id
--> next_state arrives from env / tool / evaluator
--> judge(a_t, next_state) runs m votes
--> if positive evidence-grounded hint exists:
-     append hint to original prompt
-     query teacher log-probs or corrected action
-     create slime-compatible Sample
-   else:
-     drop sample or keep process-reward-only record
+summary-to-raw escalation policy
 ```
 
-Every accepted training sample must be evidence-grounded by default. It needs `raw_evidence_id`, `turn_id`, `memory_id`, `student_action`, `teacher_action`, and `verifiable_reason`. Samples without evidence ids are still written to diagnostics, but excluded from OPD training unless `require_raw_evidence=false`.
-
-## 3. New Code Layout
+Not the research object:
 
 ```text
-research-automation/slime-context-manager/
-├── README.md
-├── opd/
-│   ├── __init__.py
-│   ├── action_parser.py
-│   ├── context_policy_opd_server.py
-│   ├── hindsight_judge.py
-│   ├── opd_rollout.py
-│   ├── teacher_logprob.py
-│   └── topk_distillation_loss.py
-└── tests/
-    ├── test_opd_components.py
-    └── test_opd_multiturn.py
+retriever fine-tuning
+main LLM fine-tuning
+long-term memory management
+new distillation algorithm
 ```
 
-The package is intentionally dependency-light. Unit tests run without slime, FastAPI, SGLang, Megatron, or a GPU. When slime is installed, the rollout bridge returns slime `Sample` and `RolloutFnTrainOutput` objects; otherwise it returns local compatibility stubs.
+## 2. Summary-First Data Model
 
-## 4. Training Paths
+Every candidate span must keep both raw text and a cue-preserving summary:
 
-| Path | Default | Purpose | Required signal |
-|---|---:|---|---|
-| `Action OPD` | Yes | Train JSON memory actions with CE/SFT data | `teacher_action` |
-| `Token OPD` | Optional | OpenClaw-style token-level OPD | `teacher_log_probs` |
-| `Top-K OPD` | Optional | SDFT/SDPO-style top-K reverse KL | `teacher_topk_log_probs`, `teacher_topk_indices` |
-| `GRPO` | Future | Optimize process/final rewards | grouped rollouts and custom reward |
+```json
+{
+  "span_id": "span_001",
+  "source_id": "hotpotqa_doc4_sent2",
+  "raw_text": "The dosage changed from 5mg to 50mg after the second trial.",
+  "summary_text": "Dosage changed after second trial; exact values in raw span.",
+  "summary_cues": ["dosage", "changed", "second trial", "exact values"],
+  "action": "KEEP_SUMMARY"
+}
+```
 
-`Action OPD` is the low-resource default. `Token OPD` is enabled only when a teacher endpoint can return log-probs for the original action tokens. `Top-K OPD` is off by default through `distill_topk=0`.
+The summary is not a final answer substitute. It is a raw-access index. It should preserve:
 
-## 5. Slime Integration Points
+```text
+entity cue
+relation cue
+number/time cue or placeholder
+uncertainty cue
+source cue
+raw access handle
+```
 
-The implementation reserves the following slime hooks:
+Bad summaries should be detected in preprocessing or counted in evaluation:
+
+```text
+bad:  Details about trial procedure.
+good: Dosage changed after second trial; exact values in raw span.
+```
+
+## 3. Rendering Rules
+
+```text
+HIDE          -> render nothing for this span
+KEEP_SUMMARY  -> render summary_text
+EXPAND_TO_RAW -> render raw_text, optionally preceded by summary_text
+```
+
+The first implementation can train a single action head:
+
+```text
+L = CE(action, target_action)
+```
+
+The paper-facing action space is progressive disclosure.
+
+## 4. Teacher-Guided Label Builder
+
+Teacher review must not assume a full raw long-context prompt. It should use summary-level batched review:
+
+```text
+question
+candidate summary
+current action
+model answer
+gold/verifier outcome on train split
+optional contrastive rollout difference
+optional raw text only when reviewing an expansion candidate
+```
+
+Teacher emits a source-grounded policy-improvement target:
+
+```json
+{
+  "span_id": "span017",
+  "student_action": "KEEP_SUMMARY",
+  "target_action": "EXPAND_TO_RAW",
+  "label_source": "teacher_only",
+  "quoted_summary": "Dosage changed after second trial; exact values in raw span.",
+  "quoted_raw": "The dosage changed from 5mg to 50mg after the second trial.",
+  "verifiable_reason": "The question asks for exact values that are absent from the summary.",
+  "accepted_for_training": true
+}
+```
+
+Teacher-only labels are allowed in training, but every experiment must track them separately from:
+
+```text
+counterfactual
+gold_support
+verifier_evidence
+contrastive_rollout
+```
+
+## 5. Contrastive Rollout Review Without GRPO
+
+Multiple rollouts are used as a label amplifier, not as GRPO:
+
+```text
+same task -> sample K disclosure plans
+-> fixed main model answers each prompt
+-> evaluator splits success/failure
+-> diff success and failure action maps
+-> teacher reviews only differing spans in summary-first batches
+-> write source-grounded target_action labels
+-> train with CE/SFT
+```
+
+No GRPO in the first version:
+
+```text
+no group advantage
+no policy-gradient update
+no reward normalization
+```
+
+## 6. Counterfactual Audit
+
+Optional stronger validation:
+
+```text
+hide_expanded_span
+summary_instead_of_raw
+expand_summary_to_raw
+```
+
+Useful audit signals:
+
+```json
+{
+  "counterfactuals": [
+    {"variant": "summary_instead_of_raw", "score_before": 1.0, "score_after": 0.4, "score_delta": 0.6},
+    {"variant": "hide_span", "score_before": 1.0, "score_after": 0.0, "score_delta": 1.0}
+  ]
+}
+```
+
+Counterfactual audit is not required for every training sample. It is most valuable for:
+
+```text
+gold supporting facts
+teacher-selected expansion candidates
+success/failure differing spans
+high-cost raw expansions
+```
+
+## 7. Dataset Pipeline
+
+Initial HF datasets:
+
+```text
+HotpotQA
+2WikiMultiHopQA
+MuSiQue
+Qasper / NarrativeQA extension
+LongBench subset extension
+```
+
+Processing steps:
+
+```text
+download dataset
+split documents into candidate spans
+generate cue-preserving summaries
+build fixed retriever top-k candidates
+run disclosure policy
+render prompt
+evaluate answer
+build teacher targets
+export CE/SFT JSONL
+```
+
+## 8. Slime / Local Training Paths
+
+Primary low-resource path:
+
+```text
+Progressive Disclosure CE
+```
+
+Compatibility and future paths:
+
+| Path | Status | Purpose |
+|---|---|---|
+| `Progressive Disclosure CE` | primary | Train `HIDE/KEEP_SUMMARY/EXPAND_TO_RAW`. |
+| `Visibility OPD` | compatibility | Reuse older `RAW/SUMMARY/HIDDEN` JSON labels. |
+| `Token OPD` | optional | Attach teacher log-probs to selector output tokens. |
+| `Top-K OPD` | optional | Reverse-KL distillation for slime custom loss. |
+| `GRPO` | future | Use grouped rollouts and process rewards after CE path is stable. |
+
+Reserved slime hooks:
 
 ```text
 --rollout-function-path opd.opd_rollout.generate_rollout_opd
@@ -76,48 +227,36 @@ The implementation reserves the following slime hooks:
 --custom-loss-function-path opd.topk_distillation_loss.topk_distillation_loss_function
 ```
 
-The first version uses the rollout bridge mainly as an OPD sample queue. It can later support GRPO by grouping samples with `episode_id + turn_id` and computing reward from turn-level PRM scores plus final episode outcome.
+## 9. Evaluation Metrics
 
-## 6. Multi-Turn Records
-
-Each episode keeps both turn-level and episode-level records:
-
-```json
-{
-  "episode_id": "ep001",
-  "turn_rewards": [
-    {"turn_id": 1, "process_reward": 1.0},
-    {"turn_id": 2, "process_reward": -1.0}
-  ],
-  "final_reward": 1.0,
-  "evidence_recall": 0.86,
-  "token_cost": 7210
-}
+```text
+answer_em_f1
+supporting_evidence_recall
+expansion_precision
+expansion_recall
+missed_expansion_rate
+unnecessary_expansion_rate
+cue_preservation_rate
+token_budget_usage
+policy_improvement_delta
+teacher_only_label_rate
 ```
 
-`session_done=true` clears pending turns that never received a next state. These turns are diagnostics-only and do not become training samples.
+## 10. Test And Acceptance Criteria
 
-## 7. Test And Acceptance Criteria
+- Parser handles `HIDE`, `KEEP_SUMMARY`, `EXPAND_TO_RAW`, unknown actions, and invalid JSON.
+- Cue-preserving summary builder records `summary_cues` and `source_id`.
+- Teacher target builder requires `quoted_summary`, `verifiable_reason`, and `label_source`.
+- Optional raw review is span-local, not full-context.
+- Contrastive rollout builder can diff success/failure action maps.
+- CE sample builder masks only target action tokens.
+- Held-out evaluator runs after every training round.
+- Counterfactual audit computes `hide_span`, `summary_instead_of_raw`, and `expand_summary_to_raw` deltas when enabled.
 
-The smoke-test target is:
-
-```powershell
-python -m unittest discover -s research-automation/slime-context-manager/tests -v
-```
-
-Acceptance criteria:
-
-- Hint parser handles `\boxed{1}`, `\boxed{-1}`, `\boxed{0}`, and hint blocks.
-- Vote selection picks the longest valid positive hint.
-- Memory action parser handles valid JSON, embedded JSON, unknown actions, and invalid JSON.
-- OPD sample builder aligns `response_length`, `loss_mask`, `rollout_log_probs`, and `teacher_log_probs`.
-- Samples without `raw_evidence_id` are excluded from training by default.
-- Multi-turn recorder supports pending turn cleanup and episode reward summaries.
-
-## 8. References
+## 11. References
 
 - OpenClaw-RL OPD README: https://github.com/Gen-Verse/OpenClaw-RL/blob/main/openclaw-opd/README.md
-- OpenClaw-RL OPD server: https://github.com/Gen-Verse/OpenClaw-RL/blob/main/openclaw-opd/openclaw_opd_api_server.py
-- OpenClaw-RL rollout bridge: https://github.com/Gen-Verse/OpenClaw-RL/blob/main/openclaw-opd/openclaw_opd_rollout.py
-- OpenClaw-RL top-K loss: https://github.com/Gen-Verse/OpenClaw-RL/blob/main/openclaw-opd/topk_distillation_loss.py
 - slime usage guide: https://github.com/THUDM/slime/blob/main/docs/en/get_started/usage.md
+- LLMLingua: https://arxiv.org/abs/2310.05736
+- LongLLMLingua: https://arxiv.org/abs/2310.06839
+- RECOMP: https://arxiv.org/abs/2310.04408

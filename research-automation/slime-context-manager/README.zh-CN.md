@@ -1,47 +1,51 @@
-# Slime Context Manager 中文说明
+# Slime Progressive Evidence Disclosure 中文说明
 
-本目录用于实现 **外部 context manager / memory policy** 的训练与评测流程。这里不训练主 agent，不更新主 LLM 参数；训练对象是一个轻量的外部上下文管理策略，用来决定长链路任务中证据的生命周期。
+本目录用于实现 **progressive evidence disclosure / summary-to-raw expansion** 的训练与评测流程。这里不训练主 agent，不更新主 LLM 参数，也不主张完整长期记忆系统；训练对象是一个轻量外部 policy，用来判断摘要是否足够，或是否需要展开原文。
 
 对应英文说明见：[README.md](README.md)
 
 ## 核心目标
 
-外部 policy 的输入是当前任务状态、memory item、上下文预算和已有 memory inventory；输出是一个 memory action：
+外部 policy 的输入是任务状态、候选片段的 cue-preserving summary、上下文预算和当前渲染状态；输出是三类 progressive disclosure 动作：
 
 ```text
-KEEP / COMPRESS / ARCHIVE / RETRIEVE / UPDATE / DROP / PIN
+HIDE
+KEEP_SUMMARY
+EXPAND_TO_RAW
 ```
 
-主 agent 仍然负责推理、回答、调用任务工具。外部 context manager 只负责决定：
+主 agent 仍然负责推理、回答、调用任务工具。外部 selector 只负责决定：
 
 ```text
-哪些证据保留在 working context
-哪些证据压缩成摘要
-哪些证据归档但保留 raw pointer
-什么时候回读原文
-哪些内容需要固定或禁止删除
+哪些 summary 当前不放入 prompt
+哪些 summary 保持摘要视图即可
+哪些 summary 信息不足，需要展开 RAW 原文
 ```
 
-## OPD 自训练流程
+## Teacher-Guided 训练流程
 
-当前实现参考 OpenClaw-RL 的 OPD 思路，但把训练对象从完整 agent response 改成 memory action：
+当前实现保留 OpenClaw-RL 风格 OPD/SDFT 接口，但论文主线不是“新的蒸馏算法”。主线是 progressive evidence disclosure；teacher target 是基于 outcome 的 policy-improvement signal，不是客观真值。
 
 ```text
-student memory action
--> next-state feedback
--> hindsight hint
--> teacher correction 或 teacher log-probs
--> slime-compatible sample
+所有候选片段先生成 cue-preserving summary
+-> 当前 policy 决定 HIDE / KEEP_SUMMARY / EXPAND_TO_RAW
+-> 固定主模型回答
+-> evaluator 返回答案对错 / 证据指标
+-> teacher 分块审查 question + summary + outcome，必要时查看局部 raw
+-> teacher 给出 HIDE / KEEP_SUMMARY / EXPAND_TO_RAW target
+-> 训练下一轮 disclosure policy
+-> fixed held-out split 验证是否真实提升
 ```
 
-具体步骤：
+teacher 的优势不来自一次性读取完整长文本，而来自：
 
-1. 当前外部 policy 输出 memory action。
-2. 系统暂存该 turn 的 `prompt_ids`、`response_ids`、`rollout_log_probs`、`memory_id` 和 `turn_id`。
-3. 下一轮状态到来后，例如环境反馈、工具返回、最终 evaluator 反馈，触发 hindsight judge。
-4. judge 输出 `\boxed{1}`、`\boxed{0}` 或 `\boxed{-1}`，正样本需要包含 `[HINT_START]...[HINT_END]`。
-5. 如果 hint 有效且包含 `raw_evidence_id`，则构造 OPD 训练样本。
-6. 样本可以进入 Action OPD、Token OPD 或未来的 Top-K OPD / GRPO 流程。
+```text
+分块审查：逐个 span 看 question + summary + outcome
+结果特权：训练集可看 gold answer / failed answer / verifier feedback
+对比特权：同题成功/失败 rollout 的差异帮助定位关键 span
+```
+
+每条 teacher target 必须包含 `source_id`、`quoted_summary`、必要时的 `quoted_raw` 和 `verifiable_reason`。`teacher_only` 样本可以训练，但必须和 counterfactual / verifier / gold-support 标签分开统计。
 
 ## 文件结构
 
@@ -65,23 +69,24 @@ research-automation/slime-context-manager/
 
 | 模块 | 作用 |
 |---|---|
-| `action_parser.py` | 解析 memory action JSON，处理非法 action |
+| `action_parser.py` | 解析 selector JSON，处理非法 target |
 | `hindsight_judge.py` | 解析 judge 输出、选择最佳 hindsight hint |
 | `context_policy_opd_server.py` | OPD recorder、多轮 pending turn、可选 OpenAI-compatible proxy |
 | `teacher_logprob.py` | 构造带 hint 的 teacher prompt，并对齐 teacher log-probs |
 | `opd_rollout.py` | slime rollout bridge 和 custom reward hook |
 | `topk_distillation_loss.py` | 预留 Top-K OPD reverse-KL loss |
 
-## OPD 模式
+## 训练模式
 
 | 模式 | 当前状态 | 说明 |
 |---|---|---|
-| Action OPD | 已实现骨架 | teacher 生成 corrected memory action，用于 action-level CE / SFT |
-| Token OPD | 已预留接口 | teacher 对原始 action tokens 计算 log-probs |
+| Progressive Disclosure CE | 主路径 | 训练 `HIDE/KEEP_SUMMARY/EXPAND_TO_RAW` 动作 |
+| Visibility OPD | 兼容路径 | 保留旧版三态 visibility JSON 标签 |
+| Token OPD | 已预留接口 | teacher 对原始 selector tokens 计算 log-probs |
 | Top-K OPD | 已预留 loss | 使用 teacher top-K 分布做 reverse-KL 蒸馏，默认关闭 |
 | GRPO | 后续扩展 | 已保留 turn-level reward 和 episode-level record |
 
-第一阶段默认使用 **Action OPD**。它资源成本最低，也最适合先验证外部 policy 是否能学会更好的记忆动作。
+第一阶段默认使用 **Progressive Disclosure CE**。它资源成本最低，也最适合验证外部 policy 是否能学会什么时候 summary 不够、需要展开 RAW。
 
 ## 多轮对话与过程奖励
 
@@ -136,7 +141,7 @@ python -m unittest discover -s research-automation/slime-context-manager/tests -
 
 - hindsight hint parser
 - 多 vote hint selection
-- memory action parser
+- progressive disclosure action parser
 - OPD sample builder
 - `response_length / loss_mask / teacher_log_probs` 对齐
 - 无 `raw_evidence_id` 样本默认不进入训练
@@ -217,15 +222,24 @@ data/grpo_sdft_hf/
 python scripts/run_sdft_async_hf_dataset.py --dataset hotpotqa/hotpot_qa --config distractor --split validation --max-rows 8 --k-rollouts 4
 ```
 
-这条链路会筛选失败 trajectory actions，用 `asyncio` 并发提取 hindsight hints，生成 corrected SDFT samples，并验证 slime-compatible SDFT rollout batch。
+这条链路会筛选失败 selector decisions，用 `asyncio` 并发提取 hindsight hints，生成 source-grounded correction samples，并验证 slime-compatible rollout batch。
 
-基于生成的 corrected-action 数据，在单卡上实际跑 SDFT 训练：
+基于生成的 correction 数据，在单卡上实际跑训练：
 
 ```powershell
 python scripts/train_sdft_hf_local.py --model-path C:\path\to\local\checkpoint --train-jsonl data\sdft_async_hf\sdft_slime_sft_validation.jsonl --output-dir checkpoints\context_policy_sdft --max-steps 16 --dtype float32
 ```
 
-这个训练脚本只对 corrected memory/tool action 的 response tokens 计算 loss，默认用 `float32` 保证单卡小规模训练稳定。当前机器上的 slime 包如果只有 rollout 模块、没有通用 `python -m slime` 训练入口，可以先用这个入口完成本地 SDFT 训练闭环，再把 `grpo_sdft.async_sdft_rollout.generate_rollout_sdft` 接到机器上的 slime launcher。
+这个训练脚本只对 corrected selector target 的 response tokens 计算 loss，默认用 `float32` 保证单卡小规模训练稳定。当前机器上的 slime 包如果只有 rollout 模块、没有通用 `python -m slime` 训练入口，可以先用这个入口完成本地训练闭环，再把 `grpo_sdft.async_sdft_rollout.generate_rollout_sdft` 接到机器上的 slime launcher。
+
+在远端单卡机器上走 THUDM/slime async 训练入口：
+
+```bash
+cd /root/CM-OPD/research-automation/slime-context-manager
+CONDA_PREFIX=/root/miniconda3/envs/slime bash scripts/run_sdft_slime_async_qwen3_0_6b.sh
+```
+
+这个 launcher 会把 `grpo_sdft.async_sdft_rollout.generate_rollout_sdft` 作为 `--rollout-function-path` 接入 slime，读取 `prompt/label/metadata` SDFT JSONL，补齐 `tokens/response_length/loss_mask`，并使用 slime 原生 `sft_loss` 训练。如果 Megatron torch-dist checkpoint 不存在，会先从本地 HF checkpoint 转换。root 文件系统空间紧张时，可以覆盖 `TORCH_DIST_LOAD` 或 `SAVE_DIR`。
 
 导出 slime 训练数据：
 
@@ -304,11 +318,11 @@ python scripts/run_eval_local.py --policy model --model-path C:\path\to\local\ch
 
 ## 当前边界
 
-当前实现已经从单纯 OPD 骨架扩展为可 smoke test 的训练-评测项目。它已经具备：
+当前实现已经从单纯 OPD 骨架扩展为可运行的训练-评测项目。它已经具备：
 
-- 外部 policy OPD 数据结构
+- 外部 progressive disclosure policy 数据结构
 - 多轮 session 管理
-- Action OPD 样本构造
+- progressive disclosure / visibility 样本构造
 - Token OPD / Top-K OPD 扩展接口
 - GRPO 过程奖励字段预留
 - toy / HotpotQA 数据处理入口
@@ -324,4 +338,4 @@ python scripts/run_eval_local.py --policy model --model-path C:\path\to\local\ch
 - Token OPD 连接真实 teacher log-prob server
 - GRPO 训练执行
 
-这些会在下一阶段接到当前 OPD 骨架上。
+这些会在下一阶段接到当前 progressive disclosure 训练骨架上。

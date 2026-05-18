@@ -1,427 +1,366 @@
-# FASD-Mem 外部上下文管理器论文蓝图
+# Learning When to Expand: Progressive Evidence Disclosure for Long-Context Reasoning
 
-_版本 A：不更新主 agent 参数，只学习外部 context manager / memory policy。日期：2026-05-16。_
+_主线版本：不训练主 LLM，不 claim agent memory system，不把 self-distillation 当论文身份。核心问题是：给定长文本的摘要视图，模型能否学会判断哪些片段值得进一步展开为原文，以支持更可靠的推理。日期：2026-05-18。_
 
 ---
 
-## 1. 不要混淆
+## 1. Scope
 
-| 维度 | 版本 A：外部上下文管理器 | 版本 B：主模型 memory-tool policy |
-|---|---|---|
-| 训练谁 | 外部 `context manager` / 轻量 `memory policy` | 主 agent backbone |
-| 推理时谁做 memory action | 外部 policy | 主 agent 自己调用 memory tools |
-| 主 claim | 只替换记忆管理策略也能提升长链路表现 | self-distillation 能教会主 agent 更好地使用 memory tools |
-| 最强 baseline | RAG / rule policy / action SFT | vanilla SFT / ReAct SFT / tool-call SFT |
-| 归因难度 | 低，因为主 agent 固定 | 高，因为主 agent 行为整体改变 |
-| 资源需求 | 低，可用 classifier 或 0.5B-1.5B policy | 中高，通常需要 7B/14B 级 agent 微调 |
+本文研究的是 **progressive evidence disclosure for long-context reasoning**。它不是长期记忆系统，也不是新的蒸馏算法。系统固定主模型、retriever、prompt template 和 token budget，只训练一个轻量外部 policy 来决定候选片段如何进入当前 prompt。
 
-本文档只描述版本 A。它的实验必须固定主 agent、工具、环境、retriever 和 token budget，唯一被替换的是上下文管理器。
-
-## 2. 论文定位
-
-推荐标题是 `FASD-Mem: Failure- and Success-Aware Self-Distillation for Transferable Agent Memory Policies`。这篇论文的核心问题是：长链路 agent 是否需要昂贵的端到端强化学习才能改善记忆行为，还是可以先把上下文管理抽象成一个较小、可验证、可迁移的外部策略学习问题。
-
-本文把 agent memory 建模为 evidence lifecycle control。主 agent 负责推理、调用任务工具和生成最终答案；外部 context manager 负责决定哪些历史信息进入当前 prompt，哪些被压缩，哪些进入 archive，哪些需要回读。这个设计的关键是，压缩不等于删除：每个摘要都必须保留 `raw_pointer`，从而让 agent 在需要精确信息时可以回到原始证据。
-
-论文不把 GRPO 作为主线，也不把端到端 agent policy training 作为主线。最小闭环是：收集当前 context manager 产生的成功/失败轨迹，用 teacher 对 memory action 做 evidence-grounded correction，然后训练一个轻量 policy 学会 `state -> memory action`。
-
-## 3. 一句话贡献
-
-`FASD-Mem` 将长链路 agent 的记忆管理从端到端 RL 问题转化为外部 evidence lifecycle policy learning：成功轨迹提供 demonstration，失败轨迹提供 rich feedback，raw evidence pointer 提供可验证 grounding，轻量 context manager 学会在受限 token budget 下执行 `KEEP`、`COMPRESS`、`ARCHIVE`、`RETRIEVE`、`UPDATE`、`DROP` 和 `PIN`。
-
-## 4. Abstract 草稿
-
-Long-horizon language agents often fail because they lose, distort, or fail to retrieve evidence observed many turns earlier. Existing context management strategies such as sliding windows, periodic summaries, and retrieval-augmented memory either discard early evidence, compress away exact details, or retrieve information without understanding the current task phase. We introduce `FASD-Mem`, a failure- and success-aware self-distillation framework for learning transferable external memory policies. Instead of updating the main agent, `FASD-Mem` trains a lightweight context manager over evidence lifecycle actions including `KEEP`, `COMPRESS`, `ARCHIVE`, `RETRIEVE`, `UPDATE`, `DROP`, and `PIN`. Successful trajectories identify memory decisions that later proved useful, while failed trajectories provide rich feedback about missing evidence, repeated actions, and summary distortion. A privileged teacher observes trajectory outcomes, diagnostics, and raw evidence pointers to correct the current policy's memory decisions; a student context manager is then trained on these corrected actions. Under fixed-backbone and fixed-budget evaluations, this framework is designed to improve evidence recall, reduce token usage, and increase task success over sliding-window, summary-only, RAG, rule-based, and action-SFT baselines. The central claim is that many long-horizon memory failures can be addressed by learning an external, evidence-grounded context policy before expensive reinforcement learning is needed.
-
-实验结果完成前，abstract 中所有效果表述都应保持为“is designed to / we evaluate whether”，不要提前写具体提升数字。
-
-## 5. Research Questions
-
-| 编号 | 问题 | 实验回答方式 |
-|---|---|---|
-| RQ1 | 在固定主 agent 和固定 token budget 下，学习型外部 context manager 是否优于 sliding window、summary-only、RAG 和 rule policy？ | 主实验 |
-| RQ2 | success/failure-aware self-distillation 是否优于普通 action SFT 和 offline distillation？ | 训练方式对比 |
-| RQ3 | raw evidence pointer 是否能降低 summary distortion 和 memory pollution？ | `w/o raw pointer` 消融 |
-| RQ4 | 学到的 memory action policy 是否能跨任务、跨预算、跨环境迁移？ | transfer 与 budget stress test |
-
-主实验要回答的最小命题是：在主 agent 不变的条件下，提升是否来自 memory manager，而不是来自更强模型、更多上下文或更多工具。
-
-## 6. 核心贡献
-
-### 6.1 Evidence lifecycle control
-
-论文把上下文管理器输出定义为有限动作空间，而不是自由文本摘要器：
+固定项：
 
 ```text
-KEEP      保留在 working context
-COMPRESS  生成短表示，同时保留 raw pointer
-ARCHIVE   移出 working context，但保持可回读
-RETRIEVE  从 archive 回读原文或片段
-UPDATE    合并、修正或替换旧 memory
-DROP      丢弃低风险信息
-PIN       固定关键约束、目标或证据
+main LLM
+retriever
+prompt template
+token budget
+benchmark split
 ```
 
-这个动作空间是任务无关的。HotpotQA 的 supporting facts、ALFWorld 的环境状态、ScienceWorld 的实验观察、coding agent 的测试失败日志都可以被映射到同一套 lifecycle 操作。
-
-### 6.2 Evidence-grounded self-distillation
-
-成功轨迹和失败轨迹都不直接变成普通 SFT 标签。当前 policy 必须先在自己的状态分布上提出 action，然后 teacher 才基于额外信息修正它。每条 correction 必须包含：
+唯一替换项：
 
 ```text
-turn_id
-memory_id
-raw_evidence_id
-student_action
-teacher_action
-verifiable_reason
+summary-to-raw disclosure policy
 ```
 
-这个约束让方法区别于泛泛的 reflection。teacher 不是简单说“应该记住更多”，而是指出某个 memory decision 为什么导致证据缺失，以及哪条原始证据支持修正。
-
-### 6.3 Fixed-backbone evaluation protocol
-
-本文最重要的实验协议是固定所有 agent 能力来源，只替换 context manager：
+推荐标题：
 
 ```text
-same main agent
-same system prompt
-same tools
-same retriever
-same token budget
-same benchmark split
-different context manager
+Learning When to Expand: Progressive Evidence Disclosure for Long-Context Reasoning
 ```
 
-这个协议让结果归因更干净。如果 `FASD-Mem` 超过强非 RL baseline，就可以说提升来自记忆动作策略，而不是来自主模型能力。
-
-## 7. 方法总览
-
-```mermaid
-flowchart TD
-    accTitle: External Memory Policy Overview
-    accDescr: The diagram shows how fixed-agent trajectories are converted into evidence-grounded corrections for a lightweight external context manager.
-
-    task["Long-horizon task"] --> fixed_agent["Fixed main agent"]
-    fixed_agent --> env_tools["Tools and environment"]
-    env_tools --> observations["Observations and tool outputs"]
-    observations --> memory_os["External memory OS"]
-    memory_os --> state["Memory decision state"]
-    state --> policy["Context manager policy"]
-    policy --> action["Memory action"]
-    action --> context["Working context"]
-    context --> fixed_agent
-    env_tools --> outcome["Success or failure outcome"]
-    outcome --> teacher_context["Privileged teacher context"]
-    observations --> archive["Raw evidence archive"]
-    archive --> teacher_context
-    state --> teacher_context
-    teacher_context --> correction["Evidence-grounded correction"]
-    correction --> distill["Action-level distillation"]
-    distill --> policy
-
-    classDef fixed fill:#f3f4f6,stroke:#6b7280,stroke-width:1px,color:#111827
-    classDef learned fill:#dcfce7,stroke:#16a34a,stroke-width:1px,color:#14532d
-    classDef evidence fill:#dbeafe,stroke:#2563eb,stroke-width:1px,color:#1e3a5f
-    classDef train fill:#fef9c3,stroke:#ca8a04,stroke-width:1px,color:#713f12
-
-    class fixed_agent,env_tools fixed
-    class policy,distill learned
-    class observations,archive,context evidence
-    class teacher_context,correction,outcome train
-```
-
-部署时 teacher 不存在。部署系统只包含固定主 agent、外部 memory OS 和训练好的 context manager policy。
-
-## 8. 形式化定义
-
-在 episode 的第 `t` 步，主 agent 看到 working context `C_t` 并调用任务工具。外部 memory OS 维护 memory store `M_t`。每个 memory item 定义为：
-
-```json
-{
-  "id": "mem_034",
-  "type": "test_failure",
-  "summary": "The target auth test failed because the middleware returned 200 instead of 401.",
-  "raw_pointer": "archives/ep001/tool_pytest_003.txt",
-  "metadata": {
-    "files": ["src/auth/middleware.py", "tests/test_auth.py"],
-    "symbols": ["AuthMiddleware", "test_auth_expired_token"],
-    "token_count": 1842,
-    "has_error": true
-  },
-  "state": "working",
-  "utility": 0.0
-}
-```
-
-Context manager 的输入状态为：
+备选标题：
 
 ```text
-s_t = task_goal, recent_context_summary, memory_item, memory_inventory, budget_state, retrieval_state
+From Summary to Raw Evidence: Learning Progressive Context Disclosure for Long-Context Reasoning
 ```
 
-输出动作是：
+## 2. Core Claim
+
+长文本推理不一定需要一开始把所有原文塞进 prompt。更自然的工作流是：
 
 ```text
-a_t in {KEEP, COMPRESS, ARCHIVE, RETRIEVE, UPDATE, DROP, PIN}
+先看 cue-preserving summary
+-> 判断哪些摘要不够充分
+-> 展开少量 RAW evidence
+-> 在 summary + selected raw 下推理
 ```
 
-Student policy 是：
+本文的核心不再是泛泛的 useful information selection，而是：
 
 ```text
-pi_theta(a_t | s_t)
+learning summary-to-raw expansion for long-context reasoning
 ```
 
-Teacher 在训练数据生成阶段看到额外信息：
+三类动作重新解释为：
 
-```text
-z_t = final_outcome, success_trace, failure_feedback, raw_evidence, trajectory_diagnostics
-```
-
-Teacher correction 是：
-
-```text
-a_T = Teacher(s_t, z_t)
-```
-
-低资源训练目标使用 action-level cross entropy：
-
-```text
-L_action = - log pi_theta(a_T | s_t)
-```
-
-如果可以访问 teacher logits，则可扩展为 KL distillation：
-
-```text
-L_KL = KL(pi_T(. | s_t, z_t) || pi_theta(. | s_t))
-```
-
-首版建议使用 `L_action`，因为它实现简单、成本低，也便于用 classifier 或小模型训练。
-
-## 9. 轨迹如何生成训练数据
-
-### 9.1 成功轨迹
-
-成功轨迹提供的是“哪些 memory decision 后来被证明有用”，而不是一个应当逐步复制的专家脚本。例如在 HotpotQA 中，某个段落在第 3 步被保留，并在第 8 步回答时作为 supporting fact 使用；在 ALFWorld 中，某个失败动作被压缩保存，后续避免了重复尝试。
-
-训练数据生成流程为：
-
-```text
-successful episode
--> extract memory decision states
--> current policy proposes actions at those states
--> teacher sees successful trajectory and raw evidence
--> teacher corrects or confirms actions
--> keep only corrections with valid raw evidence ids
-```
-
-### 9.2 失败轨迹
-
-失败轨迹提供 rich feedback。失败类型可以包括 missing evidence、over-compression、bad retrieval、repeated action、invalid action、state contradiction 和 memory pollution。teacher 的任务是把最终失败追溯到具体 memory decision，而不是生成泛泛总结。
-
-示例 correction：
-
-```json
-{
-  "turn_id": 4,
-  "memory_id": "mem_017",
-  "student_action": "ARCHIVE",
-  "teacher_action": "KEEP",
-  "raw_evidence_id": "doc_4_sent_2",
-  "verifiable_reason": "The sentence contains the second supporting fact required by the question."
-}
-```
-
-这条样本的训练输入是第 4 步 context manager 当时可见的状态，标签是 `KEEP`。
-
-## 10. 数据格式
-
-每条训练样本对应一次 memory action 决策。
-
-```json
-{
-  "sample_id": "act_ep001_t004_mem017",
-  "episode_id": "ep001",
-  "split": "train",
-  "policy_version": "rule_v0",
-  "state": {
-    "task_goal": "Answer the multi-hop question using provided documents.",
-    "recent_context": "The agent has read one distractor paragraph and one likely supporting paragraph.",
-    "budget": 8000,
-    "budget_used": 6120
-  },
-  "memory_item": {
-    "id": "mem017",
-    "type": "retrieved_doc",
-    "summary": "Paragraph about Person B's education.",
-    "raw_pointer": "archives/ep001/doc_4.txt",
-    "metadata": {
-      "token_count": 912,
-      "entities": ["Person B", "University C"]
-    }
-  },
-  "student_action": "ARCHIVE",
-  "teacher_action": "KEEP",
-  "correction": {
-    "raw_evidence_id": "doc_4_sent_2",
-    "verifiable_reason": "This sentence provides a supporting fact used by the gold reasoning chain."
-  },
-  "metadata": {
-    "task_family": "hotpotqa",
-    "covered": false,
-    "budget_pressure": 0.765
-  }
-}
-```
-
-所有公开实验都必须保留 `sample_id`、`episode_id`、`split`、`memory_id`、`raw_evidence_id` 和 `task_family`，以便和 HF Datasets evaluator 对齐。
-
-## 11. 实验设计
-
-### 11.1 主实验
-
-主实验建议覆盖三类任务：
-
-| 任务族 | 作用 | 首要指标 |
-|---|---|---|
-| HotpotQA | 多跳证据保留与回读 | EM/F1、supporting fact recall、evidence recall |
-| ALFWorld | 长链路交互和避免重复动作 | success rate、invalid action rate、repeated action rate |
-| ScienceWorld | 程序性记忆和状态跟踪 | score、state fact recall、procedure recall |
-
-如果工程时间允许，可以加入 coding trace 作为第四类任务，专门测试 test failure、file path、symbol 和 stack trace 的保留能力。
-
-### 11.2 Baseline
-
-| 类别 | Baseline | 目的 |
-|---|---|---|
-| 无记忆 | No memory | 测无外部记忆下限 |
-| 窗口 | Sliding window | 测最近上下文是否足够 |
-| 摘要 | Summary-only | 测摘要失真问题 |
-| 检索 | RAG top-k | 测普通相似度检索 |
-| 规则 | Rule context manager | 测手写策略强度 |
-| 学习 | Action SFT | 测普通监督学习 |
-| 学习 | Offline distillation | 测非 on-policy teacher correction |
-| 本文 | FASD-Mem | 主方法 |
-| 本文增强 | FASD-Mem + utility rerank | 检验 runtime utility 是否有增益 |
-| 上界 | Teacher direct | 测 teacher policy 上限 |
-| 上界 | Full raw context oracle | 测不压缩理论上限 |
-
-主结果至少要超过 `Rule context manager`、`RAG top-k` 和 `Action SFT` 中的两个，否则论文应降级为系统报告或 workshop 版本。
-
-### 11.3 指标
-
-| 指标 | 含义 |
+| Action | Meaning |
 |---|---|
-| `task_success_rate` | 任务最终成功率 |
-| `answer_em_f1` | QA 准确率 |
-| `env_score` | 交互环境分数 |
-| `evidence_recall` | 关键原文证据是否被保留或可回读 |
-| `retrieve_precision` | 回读内容是否被后续行动使用 |
-| `symbol_recall` | 实体、文件名、函数名、测试名、状态变量是否保留 |
-| `compression_ratio` | 压缩比例 |
-| `peak_context_tokens` | 峰值上下文长度 |
-| `total_input_tokens` | 总输入 token 成本 |
-| `memory_pollution_rate` | 错误或过期记忆进入上下文的比例 |
-| `forbidden_action_rate` | 对必须保留内容执行 DROP 等危险动作的比例 |
+| `HIDE` | summary 也不放入当前 prompt，表示当前无关或预算不允许。 |
+| `KEEP_SUMMARY` | 保留摘要视图，说明语义线索足够。 |
+| `EXPAND_TO_RAW` | 从摘要升级为原文，说明摘要不足以支撑可靠推理。 |
 
-### 11.4 主结果表模板
+三点贡献：
 
-| Method | HotpotQA EM | SF Recall | ALFWorld SR | ScienceWorld Score | Evidence Recall | Tokens |
-|---|---:|---:|---:|---:|---:|---:|
-| No memory | TBD | TBD | TBD | TBD | TBD | TBD |
-| Sliding window | TBD | TBD | TBD | TBD | TBD | TBD |
-| Summary-only | TBD | TBD | TBD | TBD | TBD | TBD |
-| RAG top-k | TBD | TBD | TBD | TBD | TBD | TBD |
-| Rule policy | TBD | TBD | TBD | TBD | TBD | TBD |
-| Action SFT | TBD | TBD | TBD | TBD | TBD | TBD |
-| Offline distillation | TBD | TBD | TBD | TBD | TBD | TBD |
-| FASD-Mem | TBD | TBD | TBD | TBD | TBD | TBD |
-| FASD-Mem + utility | TBD | TBD | TBD | TBD | TBD | TBD |
-| Teacher direct | TBD | TBD | TBD | TBD | TBD | TBD |
-| Full raw context | TBD | TBD | TBD | TBD | TBD | TBD |
+1. 把长文本推理中的上下文选择问题收紧为 summary-to-raw escalation，而不是宽泛的 memory management 或 useful-span classification。
+2. 提出 cue-preserving summary：摘要不是最终答案材料，而是 raw evidence 的可展开索引。
+3. 用 outcome-aware teacher review 和成功/失败对比轨迹学习何时摘要不足、何时需要展开原文。
 
-所有 `TBD` 必须在真实实验后替换，不能使用估计数字。
+## 3. Abstract Draft
 
-## 12. 消融实验
+Long-context reasoning systems often face a trade-off between showing raw evidence and staying within a limited prompt budget. Instead of asking a model to read all raw evidence at once, we study progressive evidence disclosure: all candidate spans are first represented as cue-preserving summaries, and a lightweight policy learns which summaries should be hidden, kept as summaries, or expanded into raw evidence. This reframes context selection as a summary-to-raw escalation problem. The teacher does not require access to the full raw context; it performs batched summary-level review with outcome feedback and, when available, success/failure contrastive runs. Training uses source-grounded teacher targets as policy-improvement signals, while final validity is measured by held-out answer accuracy, supporting-evidence recall, exact-span preservation, expansion precision, and token efficiency. All empirical numbers are `TBD`.
 
-| 消融 | 回答的问题 | 预期观察 |
+## 4. Why This Is Cleaner
+
+| Old framing | New framing |
+|---|---|
+| useful information selection | progressive evidence disclosure |
+| RAW/SUMMARY/HIDDEN as parallel labels | `EXPAND_TO_RAW` as escalation from summary |
+| teacher judges whether span is useful | teacher judges whether summary is sufficient |
+| teacher may need full long context | teacher performs batched summary-level review |
+| summary is compressed evidence | summary is a cue-preserving raw pointer |
+
+This makes the teacher more realistic: it behaves like a reviewer who scans summaries, notices underspecified evidence, and asks to open the raw source only where needed.
+
+## 5. Method
+
+### 5.1 Stage 1: Cue-Preserving Summary Index
+
+Every candidate span is converted into a summary that serves as an index into the raw text, not as a final substitute for the raw text.
+
+Bad summary:
+
+```text
+The trial procedure changed.
+```
+
+Good cue-preserving summary:
+
+```text
+Dosage changed after the second trial; exact values are in the raw span.
+```
+
+The summary must preserve expansion cues:
+
+```text
+entity cue
+relation cue
+number/time cue or placeholder
+uncertainty cue
+source cue
+raw access handle
+```
+
+Minimum span record:
+
+```json
+{
+  "span_id": "doc4_sent2",
+  "source_id": "hotpotqa_doc4_sent2",
+  "raw_text": "The dosage changed from 5mg to 50mg after the second trial.",
+  "summary_text": "Dosage changed after the second trial; exact values in raw span.",
+  "summary_cues": ["dosage", "changed", "second trial", "exact values"]
+}
+```
+
+If summaries are too generic, the policy cannot know when to expand. Therefore cue preservation is a core method assumption, not a preprocessing detail.
+
+### 5.2 Stage 2: Progressive Raw Expansion
+
+Given the summary-level view, policy chooses:
+
+```text
+a_i in {HIDE, KEEP_SUMMARY, EXPAND_TO_RAW}
+```
+
+Rendering rule:
+
+```text
+HIDE          -> render nothing for this span
+KEEP_SUMMARY  -> render summary_text
+EXPAND_TO_RAW -> render raw_text, optionally with summary as header
+```
+
+Training loss can remain simple:
+
+```text
+L = CE(a_i, a_i*)
+```
+
+The important shift is semantic: `RAW` is no longer just another visibility class. It is an **escalation action** triggered when the summary is insufficient.
+
+### 5.3 Stage 3: Outcome-Aware Refinement
+
+After the fixed main model answers, teacher reviews the run:
+
+```text
+summary-level context
+selected raw expansions
+model answer
+gold/verifier outcome on train split
+optional success/failure contrast
+```
+
+Teacher target examples:
+
+```json
+{
+  "span_id": "doc4_sent2",
+  "student_action": "KEEP_SUMMARY",
+  "teacher_action": "EXPAND_TO_RAW",
+  "quoted_summary": "Dosage changed after the second trial; exact values in raw span.",
+  "quoted_raw": "The dosage changed from 5mg to 50mg after the second trial.",
+  "verifiable_reason": "The question asks for the exact dosage values, which are absent from the summary."
+}
+```
+
+Teacher target is not objective truth. It is a policy-improvement signal. Its value is judged by whether the trained policy improves held-out task performance.
+
+## 6. Teacher Privilege
+
+Teacher should not be described as reading the full raw long context. It has three more realistic privileges:
+
+| Privilege | Mechanism | Why It Helps |
 |---|---|---|
-| w/o success trajectories | 成功 demonstration 是否有用 | action quality 与泛化下降 |
-| w/o failure trajectories | 失败反馈是否有用 | failure recovery 下降 |
-| w/o raw pointer | 可回溯证据是否必要 | summary distortion 和 hallucinated memory 上升 |
-| w/o on-policy proposals | 是否只是普通 SFT | 部署状态分布上效果下降 |
-| w/o utility rerank | runtime utility 是否有帮助 | retrieve precision 下降 |
-| classifier vs 0.5B vs 1.5B | 小模型是否足够 | 动作空间窄时小模型可能接近 LLM |
-| 4K vs 8K vs 16K budget | 预算越紧是否收益越大 | 低预算下相对提升更明显 |
+| Progressive disclosure | Teacher first sees summaries, then may inspect raw for selected spans. | Same context scale as student, but can request local expansion. |
+| Outcome privilege | Teacher sees train-split final answer, failed answer, verifier feedback, or gold answer. | It can diagnose which summary may have been insufficient. |
+| Contrastive privilege | Same task has multiple rendering plans, some correct and some wrong. | Differences reveal which expansions likely mattered. |
 
-其中 `w/o raw pointer` 和 `w/o on-policy proposals` 是最关键的两个消融，分别支撑“不是普通摘要”和“不是普通 SFT”。
+Contrastive example:
 
-## 13. Reviewer 可能会问什么
+```text
+Rollout A -> correct
+  span_7 = EXPAND_TO_RAW
 
-### 13.1 这是不是普通 RAG？
+Rollout B -> wrong
+  span_7 = KEEP_SUMMARY
 
-不是。RAG 主要决定检索哪些文本进入上下文，而本文学习的是 memory lifecycle action，包括何时保留、何时压缩、何时归档、何时回读、何时固定，以及何时禁止删除。实验上要用 `RAG top-k` 作为强 baseline。
+teacher reviews span_7 summary and raw
+-> target: EXPAND_TO_RAW
+```
 
-### 13.2 这是不是普通 SFT？
+Without GRPO, multiple rollouts are still useful. They are not used for policy-gradient advantage; they are used as a **label amplifier** for better teacher correction.
 
-不是。普通 action SFT 直接学习静态标签；本文让当前 policy 在自己的状态分布上先产生 action，再由看到 outcome、diagnostics 和 raw evidence 的 teacher 修正。实验上要用 `Action SFT` 和 `Offline distillation` 验证。
+## 7. Data Flow Without GRPO
 
-### 13.3 是否存在数据泄漏？
+```text
+1. Build cue-preserving summaries for candidate spans.
+2. Current policy samples K disclosure plans for the same task.
+3. Fixed main model answers each rendered prompt.
+4. Evaluator splits success and failure.
+5. Teacher compares summary/raw decisions across success and failure.
+6. Teacher generates source-grounded escalation targets.
+7. Train policy with CE on HIDE / KEEP_SUMMARY / EXPAND_TO_RAW.
+8. Evaluate on fixed held-out split.
+9. Iterate.
+```
 
-训练阶段 teacher 可以看训练 episode 的 outcome 和 raw evidence；评测阶段 teacher 不参与。held-out test 和 unseen split 不能用于生成 teacher correction。HotpotQA 的 gold supporting facts 可以用于训练集 correction，但不能泄漏到测试 prompt。
+This is not GRPO:
 
-### 13.4 为什么不直接用更长上下文？
+```text
+No group advantage
+No policy-gradient update
+No reward normalization
+```
 
-长上下文降低了被截断的概率，但不能自动解决证据选择、摘要失真、状态更新和 memory pollution。本文比较的是同一 token budget 下的 memory policy，而 `Full raw context oracle` 只作为上界。
+It is:
 
-### 13.5 不做 GRPO 是否足够？
+```text
+contrastive teacher-guided supervised improvement
+```
 
-本文的 claim 不是 self-distillation 永远替代 RL，而是 memory action 是一个窄动作空间，可以先用成功/失败轨迹产生密集监督。GRPO 可以作为未来扩展，不是版本 A 的主线。
+## 8. Data Schema
 
-## 14. 最小可发表版本
+```json
+{
+  "sample_id": "ped_task001_span017",
+  "task_id": "task001",
+  "question": "What dosage was used after the second trial?",
+  "candidate_span": {
+    "span_id": "span017",
+    "source_id": "doc_4_sent_2",
+    "raw_text": "The dosage changed from 5mg to 50mg after the second trial.",
+    "summary_text": "Dosage changed after second trial; exact values in raw span.",
+    "summary_cues": ["dosage", "changed", "second trial", "exact values"]
+  },
+  "student_action": "KEEP_SUMMARY",
+  "teacher_action": "EXPAND_TO_RAW",
+  "label_source": "teacher_only",
+  "quoted_summary": "Dosage changed after second trial; exact values in raw span.",
+  "quoted_raw": "The dosage changed from 5mg to 50mg after the second trial.",
+  "verifiable_reason": "Exact dosage values are required for the answer.",
+  "contrast": {
+    "success_rollout_action": "EXPAND_TO_RAW",
+    "failed_rollout_action": "KEEP_SUMMARY"
+  },
+  "accepted_for_training": true
+}
+```
 
-最低成本版本如下：
+## 9. Experiments
+
+### 9.1 Main Tasks
+
+首版主实验聚焦长文本 QA / evidence reasoning：
+
+| Task | Why |
+|---|---|
+| HotpotQA | supporting facts 明确，适合测 raw expansion 是否找对证据。 |
+| 2WikiMultiHopQA | 跨文档实体关系，适合测 summary cue 是否能引导展开。 |
+| MuSiQue | 多跳组合推理，适合测 expansion credit assignment。 |
+| Qasper / NarrativeQA | 长文档问答，适合测 summary-to-raw escalation。 |
+| LongBench 子集 | 测跨任务稳定性。 |
+
+### 9.2 Baselines
+
+| Type | Baseline |
+|---|---|
+| No expansion | summary-only |
+| All expansion | full raw / top-k raw |
+| Window | sliding window |
+| Retrieval | BM25 / frozen dense top-k |
+| Compression | LLMLingua / LongLLMLingua |
+| Rule | expand if summary contains numbers/entities/uncertainty cue |
+| Learning | static expansion SFT |
+| Ours | progressive disclosure policy with teacher-guided refinement |
+| Upper bound | oracle supporting fact expansion on train-only analysis |
+
+### 9.3 Metrics
+
+| Metric | Meaning |
+|---|---|
+| `answer_em_f1` | 最终答案质量。 |
+| `supporting_evidence_recall` | supporting facts 是否被 summary 保留或 raw 展开。 |
+| `expansion_precision` | 展开的 raw span 中真正有用的比例。 |
+| `expansion_recall` | 需要原文的 span 被展开的比例。 |
+| `missed_expansion_rate` | 应展开但只保留 summary 或 hidden 的比例。 |
+| `unnecessary_expansion_rate` | 展开但对答案无帮助的 raw span 比例。 |
+| `cue_preservation_rate` | summary 是否保留足以触发展开的线索。 |
+| `token_budget_usage` | raw expansion 消耗的 token。 |
+| `policy_improvement_delta` | 每轮迭代后 held-out 分数变化。 |
+
+## 10. Ablations
+
+| Ablation | Question |
+|---|---|
+| bad summary vs cue-preserving summary | summary 是否能作为 raw expansion index？ |
+| no raw expansion | summary-only 是否足够？ |
+| expand all | 全展开是否只是靠更多 token？ |
+| random expansion under same budget | policy 是否真学会展开？ |
+| w/o outcome privilege | teacher 看不到结果是否变弱？ |
+| w/o contrastive rollout | 成功/失败对比是否提升 target 质量？ |
+| batched teacher vs full-context teacher | teacher 是否需要完整 raw context？ |
+| single rollout vs K rollout | 多 rollout 是否只是增强标注质量？ |
+| teacher-only vs counterfactual-audited | 反事实审计是否提升稳定性？ |
+
+## 11. Reviewer Risks
+
+### 11.1 这是不是 reranking？
+
+不是。Reranking 只排序候选文本；本文学习的是从 summary view 到 raw evidence 的展开决策。输入是压缩视图，动作是 `HIDE / KEEP_SUMMARY / EXPAND_TO_RAW`。
+
+### 11.2 teacher 看不到完整长文本，怎么标注？
+
+teacher 不需要一开始看 full raw context。它先看 summary-level context，再对可疑 span 做局部 raw expansion。优势来自 progressive disclosure、outcome feedback 和 contrastive runs。
+
+### 11.3 summary 如果丢了关键线索怎么办？
+
+这是核心前提，所以本文必须引入 cue-preserving summary。摘要不是最终答案材料，而是 raw pointer。它至少要保留实体、关系、数字/时间占位、uncertainty 和 source cue。
+
+### 11.4 RAW/SUMMARY/HIDDEN 是否随意？
+
+新语义下不随意：`RAW` 是 escalation，`SUMMARY` 是默认压缩视图，`HIDDEN` 是当前不展示。policy 学的是“什么时候 summary 不够，需要展开 raw”。
+
+### 11.5 不做 GRPO 是否合理？
+
+合理。K 条 rollout 不用于 group advantage，而用于成功/失败对比，帮助 teacher 生成更好的 expansion targets。训练仍然是稳定的 CE/SFT。
+
+## 12. Minimal Publishable Version
 
 ```text
 Tasks:
-  HotpotQA + ALFWorld small split
+  HotpotQA + 2WikiMultiHopQA + MuSiQue
+
+Main model:
+  fixed 7B/14B/API model
+
+Policy:
+  classifier or 0.5B-1.5B model
+
+Actions:
+  HIDE
+  KEEP_SUMMARY
+  EXPAND_TO_RAW
 
 Teacher:
-  7B/14B/API model for correction generation
+  summary-level batched review
+  optional raw expansion for selected spans
+  outcome + contrastive rollout feedback
 
-Student:
-  classifier or Qwen2.5-0.5B/1.5B context policy
-
-Baselines:
-  sliding window
-  summary-only
-  RAG top-k
-  rule policy
-  action SFT
-
-Metrics:
-  task success
-  evidence recall
-  retrieve precision
-  token usage
-  forbidden action rate
+Key proof:
+  same backbone + same retriever + same budget
+  learned expansion policy improves answer quality and evidence preservation
 ```
 
-如果这个版本能在固定主 agent 条件下超过 rule/RAG/action SFT，并且 evidence recall 明显提升，就足以形成 workshop 或强技术报告。若再加跨任务迁移和扎实消融，可推进主会论文。
-
-## 15. 和已有文档的关系
-
-| 文档 | 关系 |
-|---|---|
-| `research-automation/context-manager-rl-slime-plan.md` | 工程系统、HF 评测、后期 slime 扩展来源 |
-| `research-automation/reports/self-distillation-rl-continual-learning-report.md` | SDPO/SDFT 的方法启发来源 |
-| `research-automation/paper-drafts/fasd-mem-top-conference-paper-blueprint.md` | 早期混合草稿，后续不再作为唯一论文框架 |
-
-## 16. 参考来源
-
-[^1]: `Reinforcement Learning via Self-Distillation`, arXiv:2601.20802. https://arxiv.org/abs/2601.20802
-[^2]: `Self-Distillation Enables Continual Learning`, arXiv:2601.19897. https://arxiv.org/abs/2601.19897
-[^3]: `ALFWorld: Aligning Text and Embodied Environments for Interactive Learning`, arXiv:2010.03768. https://arxiv.org/abs/2010.03768
-[^4]: `ScienceWorld: Is your Agent Smarter than a 5th Grader?`, arXiv:2203.07540. https://arxiv.org/abs/2203.07540
-[^5]: HotpotQA project page. https://hotpotqa.github.io/
-[^6]: HotpotQA Hugging Face dataset. https://huggingface.co/datasets/hotpotqa/hotpot_qa
+If this minimal version works, the paper has a clean claim: **long-context reasoning improves when the system learns when summaries are insufficient and raw evidence should be progressively disclosed**.
