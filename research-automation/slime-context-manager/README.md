@@ -2,14 +2,14 @@
 
 [中文 README](README.zh-CN.md)
 
-This directory contains the lightweight progressive evidence disclosure training and evaluation scaffold. The main model and retriever remain frozen; the trainable component learns when a cue-preserving summary is enough and when it should be expanded into raw evidence.
+This directory contains the lightweight progressive evidence disclosure training and evaluation scaffold. The main model and retriever remain frozen; the trainable component learns when a cue-preserving summary is enough and when raw evidence should be disclosed.
 
 The current research framing is not long-term memory management. It is summary-to-raw expansion for long-context reasoning:
 
 ```text
 candidate span
 -> cue-preserving summary
--> action: HIDE / KEEP_SUMMARY / EXPAND_TO_RAW
+-> action: EXPAND / KEEP / DROP
 -> rendered prompt: selected summaries + selected raw spans
 ```
 
@@ -126,8 +126,8 @@ filesystem is tight.
 
 | Mode | Status | Description |
 |---|---|---|
-| Progressive Disclosure CE | Primary | Train `HIDE/KEEP_SUMMARY/EXPAND_TO_RAW` targets from source-grounded teacher review. |
-| Visibility OPD | Compatibility | Backward-compatible JSON visibility labels for older scripts. |
+| Progressive Disclosure CE | Primary | Train `EXPAND/KEEP/DROP` targets from source-grounded teacher review. |
+| Legacy OPD | Compatibility | Backward-compatible JSON labels for older scripts. |
 | Token OPD | Scaffolded | Teacher log-probs can be attached to original selector tokens. |
 | Top-K OPD | Scaffolded | Optional top-K distillation loss for future slime runs. |
 | GRPO | Future | Turn-level rewards and episode records are preserved for later rollout grouping. |

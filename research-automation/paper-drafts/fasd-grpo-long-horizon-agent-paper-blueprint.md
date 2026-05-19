@@ -1,6 +1,6 @@
 # FASD-GRPO 长链路智能体论文蓝图
 
-_未来 RL 扩展路线：以 progressive evidence disclosure / summary-to-raw expansion 为基础，引入 GRPO 与 segment-level reward 做长轨迹信用分配。它不是主线论文标题，也不替代 `Learning When to Expand`。日期：2026-05-16。_
+_未来 RL 扩展路线：以 Progressive Evidence Disclosure 为基础，引入 GRPO 与 segment-level reward 做长轨迹信用分配。它不是主线论文标题，也不替代 `Learning When to Expand`。日期：2026-05-16。_
 
 ---
 
@@ -11,7 +11,7 @@ _未来 RL 扩展路线：以 progressive evidence disclosure / summary-to-raw e
 | 训练谁 | 外部 summary-to-raw expansion policy | 主 agent backbone | 外部 policy 或主 agent，实验中必须分开报告 |
 | 主优化信号 | progressive disclosure CE | tool-use SFT / OPD | GRPO + teacher-guided correction + replay + KL |
 | 信用分配粒度 | disclosure action | tool call | rollout / segment / action 三层 |
-| 主 claim | 只换 progressive disclosure 策略也能提升 | 主模型能学会工具使用 | GRPO 排序 rollout，teacher correction 修正具体步骤 |
+| 主 claim | 只换 disclosure policy 也能提升 | 主模型能学会工具使用 | GRPO 排序 rollout，teacher correction 修正具体步骤 |
 | 资源需求 | 低 | 中 | 中高 |
 
 本文默认标题为 `FASD-GRPO: Failure/Success-Aware Self-Distilled GRPO for Long-Horizon Agents`。Coding-agent specialization 可命名为 `CodeHER-GRPO: Hindsight Self-Distilled GRPO for Self-Evolving Coding Agents`。
@@ -31,7 +31,7 @@ SFT replay 和 KL 负责稳定训练、防止能力遗忘。
 
 ## 3. Abstract 草稿
 
-Long-horizon language agents often receive sparse outcome feedback after many disclosure, tool-use, editing, and verification decisions. Group-relative policy optimization can compare multiple rollouts for the same task, but final rewards alone provide weak credit assignment for the concrete step that caused success or failure. `FASD-GRPO` is a future extension of progressive evidence disclosure: for each task, the current policy samples multiple summary-to-raw expansion plans, receives verifier or environment feedback, and decomposes rewards into episode-, segment-, and action-level signals. Hindsight review proposes source-grounded policy-improvement targets for suspect decisions; these targets are not treated as objective truth, and their validity is evaluated by downstream held-out performance. Training combines GRPO, teacher-guided correction, behavior-cloning replay, and KL regularization. All empirical numbers are `TBD` until measured.
+Long-horizon language agents often receive sparse outcome feedback after many disclosure, tool-use, editing, and verification decisions. Group-relative policy optimization can compare multiple rollouts for the same task, but final rewards alone provide weak credit assignment for the concrete step that caused success or failure. `FASD-GRPO` is a future extension of Progressive Evidence Disclosure: for each task, the current policy samples multiple `EXPAND/KEEP/DROP` plans, receives verifier or environment feedback, and decomposes rewards into episode-, segment-, and action-level signals. Hindsight review proposes source-grounded policy-improvement targets for suspect decisions; these targets are not treated as objective truth, and their validity is evaluated by downstream held-out performance. Training combines GRPO, teacher-guided correction, behavior-cloning replay, and KL regularization. All empirical numbers are `TBD` until measured.
 
 ## 4. 方法
 
@@ -49,15 +49,15 @@ same task -> sample K rollouts
 -> joint train with GRPO + SDFT + replay + KL
 ```
 
-多条轨迹不是生成 reflection 的必要条件；单条失败轨迹也能被 reviewer 诊断。但如果本文主打 GRPO，`K` 条同题 rollout 的价值在于提供 group-relative contrast：成功轨迹指出哪些 visibility/tool decision 值得反事实验证，失败轨迹说明哪些 decision 可能导致证据缺失、错误工具调用或重复动作。本文将这种机制称为 `group-contrastive reflection`。
+多条轨迹不是生成 reflection 的必要条件；单条失败轨迹也能被 reviewer 诊断。但如果本文主打 GRPO，`K` 条同题 rollout 的价值在于提供 group-relative contrast：成功轨迹指出哪些 disclosure/tool decision 值得反事实验证，失败轨迹说明哪些 decision 可能导致证据缺失、错误工具调用或重复动作。本文将这种机制称为 `group-contrastive reflection`。
 
 ```text
 same task x
 -> rollout r_success gets reward 1
 -> rollout r_fail gets reward 0
--> align segments / visibility decisions when possible
--> reviewer asks: which summaries did success expand to RAW that failure kept compressed or hid?
--> produce corrected visibility label for failed rollout
+-> align segments / disclosure decisions when possible
+-> reviewer asks: which summaries did success EXPAND that failure KEPT or DROPPED?
+-> produce corrected disclosure action for failed rollout
 ```
 
 如果一个 group 全错，则 reflection 退化为 `failure-evidence reflection`，只依赖 raw evidence、verifier feedback 或 oracle supporting facts。若 group 全对，则主要进入 success replay，不强制生成 correction。无论哪种情况，teacher correction 可以进入 `L_SDFT`，但必须记录 `source_ids`、quoted evidence、label source 和 confidence，并通过 held-out evaluation 检查是否产生真实策略改进。
@@ -73,7 +73,7 @@ same task x
   "group_id": "task_001",
   "segment_id": "seg_004",
   "turn_id": 17,
-  "action_type": "visibility|tool_call|edit|test",
+  "action_type": "disclosure|tool_call|edit|test",
   "student_action": "...",
   "teacher_action": "...",
   "episode_reward": 1.0,
@@ -105,8 +105,8 @@ same task x
   "contrast_rollout_id": "task_001_r01",
   "first_bad_turn": 4,
   "failure_type": "missing_evidence",
-  "bad_action": "KEEP_SUMMARY",
-  "corrected_action": "EXPAND_TO_RAW",
+  "bad_action": "KEEP",
+  "corrected_action": "EXPAND",
   "source_ids": ["doc_4_sent_2"],
   "counterfactual_delta": null,
   "label_source": "teacher_only",
@@ -144,7 +144,7 @@ L_total = L_GRPO
 |---|---|---|
 | SFT | Vanilla SFT | 普通监督是否足够 |
 | Agent trace | Tool-call / ReAct SFT | 常规工具轨迹模仿是否足够 |
-| Action | Visibility SFT | 静态 visibility 标签是否足够 |
+| Action | Static disclosure SFT | 静态 disclosure 标签是否足够 |
 | RL | GRPO only | 只有 rollout 相对奖励是否足够 |
 | Distill | SDFT / OPD only | 只有具体修正是否足够 |
 | Reward | GRPO + final reward only | 稀疏 reward 是否不足 |
@@ -165,7 +165,7 @@ L_total = L_GRPO
 | Prompt 压缩 | LLMLingua / LongLLMLingua | 通用 prompt compressor 是否足够 |
 | 反思推理 | Reflexion-style notes | reflection 只放上下文、不训练 policy 是否足够 |
 
-检索器必须固定，不微调 retriever。本文的可学习对象是 visibility/tool policy，而不是底层 BM25、embedding encoder 或 reranker。
+检索器必须固定，不微调 retriever。本文的可学习对象是 disclosure/tool policy，而不是底层 BM25、embedding encoder 或 reranker。
 
 ## 6. 实验与指标
 
@@ -175,14 +175,14 @@ L_total = L_GRPO
 |---|---|---|
 | QA / research | HotpotQA-style multi-hop, long evidence tasks | evidence recall 与 retrieval timing |
 | Embodied / science | ALFWorld, ScienceWorld | 多轮 action 和环境反馈 |
-| Coding | SWE-style tasks, repo debugging, pytest feedback | edit/test/visibility credit assignment |
+| Coding | SWE-style tasks, repo debugging, pytest feedback | edit/test/disclosure credit assignment |
 
 核心指标：
 
 ```text
 task_success / pass@1
 segment_success_rate
-visibility_accuracy
+disclosure_action_accuracy
 tool_call_validity
 evidence_recall
 failure_recovery_rate
@@ -209,7 +209,7 @@ w/o confidence gating
 episode reward only vs segment reward
 external progressive disclosure policy vs main-agent tool policy
 single-failure reflection vs group-contrastive reflection
-generic reflection vs evidence-grounded corrected visibility
+generic reflection vs evidence-grounded corrected disclosure
 shuffled reflection
 RF-Mem retrieval features only
 ```
@@ -273,7 +273,7 @@ python scripts/run_sdft_async_hf_dataset.py \
 
 ### 8.1 这和普通 GRPO 有什么区别？
 
-普通 GRPO 只知道同组 rollout 哪个更好。`FASD-GRPO` 额外把反馈分解到 segment/action，并用 hindsight teacher 产生具体 correction，因此能处理长轨迹里的稀疏信用分配。
+普通 GRPO 只知道同组 rollout 哪个更好。`FASD-GRPO` 额外把反馈分解到 segment/action，并用 hindsight teacher 产生具体 disclosure/tool correction，因此能处理长轨迹里的稀疏信用分配。
 
 ### 8.2 这和 SDFT/OPD 有什么区别？
 
@@ -289,13 +289,13 @@ SDFT/OPD 主要修正具体动作，但缺少 group-relative rollout ranking。`
 
 ### 8.4 为什么需要 replay 和 KL？
 
-长链路 RL 容易过度优化 visibility/tool behavior，导致普通指令跟随、普通工具调用或代码编辑能力退化。`L_replay` 和 `L_KL` 是防遗忘约束，必须报告 retention 指标。
+长链路 RL 容易过度优化 disclosure/tool behavior，导致普通指令跟随、普通工具调用或代码编辑能力退化。`L_replay` 和 `L_KL` 是防遗忘约束，必须报告 retention 指标。
 
 ## 9. 参考关系
 
 | 文档 | 关系 |
 |---|---|
-| `external-context-manager-paper-blueprint.md` | 低资源外部 visibility policy 版本 |
+| `external-context-manager-paper-blueprint.md` | Progressive Evidence Disclosure 主线版本 |
 | `main-llm-memory-tool-policy-paper-blueprint.md` | 主模型 tool-use 训练版本 |
 | `self-distillation-rl-continual-learning-report.md` | SDFT/SDPO 理论来源 |
-| `context-manager-rl-slime-plan.md` | visibility schema 与 slime 扩展来源 |
+| `context-manager-rl-slime-plan.md` | 早期 slime 扩展来源 |

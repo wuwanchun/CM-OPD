@@ -1,6 +1,6 @@
 # Slime Progressive Evidence Disclosure 中文说明
 
-本目录用于实现 **progressive evidence disclosure / summary-to-raw expansion** 的训练与评测流程。这里不训练主 agent，不更新主 LLM 参数，也不主张完整长期记忆系统；训练对象是一个轻量外部 policy，用来判断摘要是否足够，或是否需要展开原文。
+本目录用于实现 **progressive evidence disclosure / summary-to-raw expansion** 的训练与评测流程。这里不训练主 agent，不更新主 LLM 参数，也不主张完整长期记忆系统；训练对象是一个轻量外部 policy，用来判断摘要是否足够，或是否需要披露原文证据。
 
 对应英文说明见：[README.md](README.md)
 
@@ -9,17 +9,17 @@
 外部 policy 的输入是任务状态、候选片段的 cue-preserving summary、上下文预算和当前渲染状态；输出是三类 progressive disclosure 动作：
 
 ```text
-HIDE
-KEEP_SUMMARY
-EXPAND_TO_RAW
+EXPAND
+KEEP
+DROP
 ```
 
 主 agent 仍然负责推理、回答、调用任务工具。外部 selector 只负责决定：
 
 ```text
-哪些 summary 当前不放入 prompt
-哪些 summary 保持摘要视图即可
-哪些 summary 信息不足，需要展开 RAW 原文
+哪些 summary 信息不足，需要 EXPAND 原文
+哪些 summary 保持 KEEP 即可
+哪些 summary 当前 DROP 不放入 prompt
 ```
 
 ## Teacher-Guided 训练流程
@@ -28,11 +28,11 @@ EXPAND_TO_RAW
 
 ```text
 所有候选片段先生成 cue-preserving summary
--> 当前 policy 决定 HIDE / KEEP_SUMMARY / EXPAND_TO_RAW
+-> 当前 policy 决定 EXPAND / KEEP / DROP
 -> 固定主模型回答
 -> evaluator 返回答案对错 / 证据指标
 -> teacher 分块审查 question + summary + outcome，必要时查看局部 raw
--> teacher 给出 HIDE / KEEP_SUMMARY / EXPAND_TO_RAW target
+-> teacher 给出 EXPAND / KEEP / DROP target
 -> 训练下一轮 disclosure policy
 -> fixed held-out split 验证是否真实提升
 ```
@@ -80,13 +80,13 @@ research-automation/slime-context-manager/
 
 | 模式 | 当前状态 | 说明 |
 |---|---|---|
-| Progressive Disclosure CE | 主路径 | 训练 `HIDE/KEEP_SUMMARY/EXPAND_TO_RAW` 动作 |
-| Visibility OPD | 兼容路径 | 保留旧版三态 visibility JSON 标签 |
+| Progressive Disclosure CE | 主路径 | 训练 `EXPAND/KEEP/DROP` 动作 |
+| Legacy OPD | 兼容路径 | 保留旧版 JSON 标签 |
 | Token OPD | 已预留接口 | teacher 对原始 selector tokens 计算 log-probs |
 | Top-K OPD | 已预留 loss | 使用 teacher top-K 分布做 reverse-KL 蒸馏，默认关闭 |
 | GRPO | 后续扩展 | 已保留 turn-level reward 和 episode-level record |
 
-第一阶段默认使用 **Progressive Disclosure CE**。它资源成本最低，也最适合验证外部 policy 是否能学会什么时候 summary 不够、需要展开 RAW。
+第一阶段默认使用 **Progressive Disclosure CE**。它资源成本最低，也最适合验证外部 policy 是否能学会什么时候 summary 不够、需要 EXPAND 原文。
 
 ## 多轮对话与过程奖励
 
@@ -322,7 +322,7 @@ python scripts/run_eval_local.py --policy model --model-path C:\path\to\local\ch
 
 - 外部 progressive disclosure policy 数据结构
 - 多轮 session 管理
-- progressive disclosure / visibility 样本构造
+- progressive disclosure 样本构造
 - Token OPD / Top-K OPD 扩展接口
 - GRPO 过程奖励字段预留
 - toy / HotpotQA 数据处理入口

@@ -1,65 +1,53 @@
 # Progressive Evidence Disclosure Slime Engineering Roadmap
 
-_目标：把论文主线 `Learning When to Expand` 落成基于 slime 的训练-评测工程。第一阶段不做 GRPO，不训练主 LLM；只训练外部 progressive disclosure policy，动作空间为 `HIDE / KEEP_SUMMARY / EXPAND_TO_RAW`。_
+_vNext roadmap：把 `Learning When to Expand` 落成 slime 工程。第一阶段只训练外部 disclosure policy，动作空间为 `EXPAND / KEEP / DROP`。_
 
 ---
 
 ## 1. System Boundary
 
-固定组件：
+固定：
 
 ```text
 main LLM
 retriever
+summary generator
 dataset split
 prompt template
 token budget
 answer evaluator
 ```
 
-训练组件：
+训练：
 
 ```text
-progressive disclosure policy
+disclosure policy
 ```
 
-policy 输入：
+动作：
 
 ```text
-question
-candidate span summary
-summary cues
-source id
-current token budget
-retriever rank / score
-optional previous disclosure actions
+EXPAND
+KEEP
+DROP
 ```
 
-policy 输出：
-
-```text
-HIDE
-KEEP_SUMMARY
-EXPAND_TO_RAW
-```
-
-首版训练目标：
+首版训练：
 
 ```text
 CE(action, teacher_target_action)
 ```
 
-slime 首版定位：
+不是：
 
 ```text
-slime-compatible SFT / CE training substrate
-not full GRPO
-not reward-only RL
+GRPO
+memory architecture
+new self-distillation algorithm
+main LLM fine-tuning
 ```
 
-## 2. Target Directory Layout
-
-新增/调整模块：
+## 2. Target Layout
 
 ```text
 research-automation/slime-context-manager/
@@ -67,11 +55,11 @@ research-automation/slime-context-manager/
 │   ├── __init__.py
 │   ├── schemas.py
 │   ├── summary_builder.py
-│   ├── policy.py
 │   ├── renderer.py
 │   ├── teacher_review.py
 │   ├── contrastive_builder.py
 │   ├── slime_sft_builder.py
+│   ├── slime_rollout.py
 │   └── metrics.py
 ├── scripts/
 │   ├── build_disclosure_dataset.py
@@ -80,6 +68,7 @@ research-automation/slime-context-manager/
 │   ├── export_disclosure_slime_jsonl.py
 │   ├── train_disclosure_hf_local.py
 │   ├── train_disclosure_slime.py
+│   ├── run_disclosure_slime_qwen3_0_6b.sh
 │   └── evaluate_disclosure_policy.py
 └── tests/
     ├── test_disclosure_schemas.py
@@ -87,93 +76,21 @@ research-automation/slime-context-manager/
     ├── test_renderer.py
     ├── test_teacher_review.py
     ├── test_contrastive_builder.py
-    └── test_disclosure_slime_export.py
+    ├── test_disclosure_slime_export.py
+    └── test_disclosure_metrics.py
 ```
 
-保留旧目录：
+旧 `context_manager/`、`opd/`、`grpo_sdft/` 保留为兼容层，不作为新主线。
 
-```text
-opd/
-grpo_sdft/
-context_manager/
-```
-
-但首版 progressive disclosure 不再依赖旧 `memory action` 语义。旧模块只作为兼容层和迁移来源。
-
-## 3. Data Schema
-
-### 3.1 Candidate Span
-
-```json
-{
-  "task_id": "hotpotqa_0001",
-  "span_id": "doc4_sent2",
-  "source_id": "hotpotqa_doc4_sent2",
-  "question": "What dosage was used after the second trial?",
-  "raw_text": "The dosage changed from 5mg to 50mg after the second trial.",
-  "summary_text": "Dosage changed after second trial; exact values in raw span.",
-  "summary_cues": ["dosage", "changed", "second trial", "exact values"],
-  "retriever_rank": 4,
-  "retriever_score": 8.3,
-  "split": "train"
-}
-```
-
-### 3.2 Disclosure Decision
-
-```json
-{
-  "decision_id": "hotpotqa_0001_doc4_sent2_r02",
-  "task_id": "hotpotqa_0001",
-  "rollout_id": "hotpotqa_0001_r02",
-  "span_id": "doc4_sent2",
-  "student_action": "KEEP_SUMMARY",
-  "target_action": "EXPAND_TO_RAW",
-  "label_source": "teacher_only",
-  "quoted_summary": "Dosage changed after second trial; exact values in raw span.",
-  "quoted_raw": "The dosage changed from 5mg to 50mg after the second trial.",
-  "verifiable_reason": "The question asks exact dosage values absent from the summary.",
-  "accepted_for_training": true
-}
-```
-
-### 3.3 Slime SFT Record
-
-```json
-{
-  "prompt": "Question: ...\nCandidate summary: ...\nBudget left: ...\nChoose one action: HIDE, KEEP_SUMMARY, EXPAND_TO_RAW.",
-  "response": "{\"action\":\"EXPAND_TO_RAW\"}",
-  "metadata": {
-    "task_id": "hotpotqa_0001",
-    "span_id": "doc4_sent2",
-    "label_source": "teacher_only",
-    "target_action": "EXPAND_TO_RAW"
-  }
-}
-```
-
-slime rollout bridge 需要补齐：
-
-```text
-tokens
-response_length
-loss_mask
-metadata
-```
-
-## 4. Phase Plan
-
-### Phase 0: Compatibility Audit
-
-目标：确认旧代码哪些能复用，哪些必须隔离。
+## 3. Phase 0: Compatibility Audit
 
 任务：
 
 ```text
-1. 标记旧 ACTIONS / MemoryItem / ContextActionSample 为 legacy。
-2. 新增 disclosure.schemas，不破坏旧测试。
-3. README 明确旧 OPD 是 compatibility path。
-4. 所有新脚本默认读取 disclosure/ 数据，不读 context_actions/。
+1. 保留旧 context_actions pipeline，但标记 legacy。
+2. 新增 disclosure/ 模块，不破坏旧 tests。
+3. README 明确主线是 progressive evidence disclosure。
+4. 新脚本默认读 data/disclosure/，不读 data/processed/context_actions/。
 ```
 
 验收：
@@ -182,9 +99,7 @@ metadata
 python -m unittest discover -s tests -v
 ```
 
-### Phase 1: Summary-First Dataset Builder
-
-目标：从 HF 数据集生成 candidate spans 和 cue-preserving summaries。
+## 4. Phase 1: Summary-First Dataset
 
 脚本：
 
@@ -198,80 +113,63 @@ scripts/build_disclosure_dataset.py
 --dataset hotpotqa/hotpot_qa
 --config distractor
 --split train
---max-rows N
+--max-rows 200
 ```
 
 输出：
 
 ```text
-data/disclosure/raw_spans_train.jsonl
-data/disclosure/candidate_spans_train.jsonl
-data/disclosure/summary_quality_train.jsonl
+data/disclosure/spans_train.jsonl
+data/disclosure/summary_quality_train.json
 ```
 
-summary 首版生成策略：
+schema：
 
-```text
-rule summary for tests
-extractive summary for HF data
-optional API/teacher summary later
+```json
+{
+  "task_id": "hotpotqa_0001",
+  "span_id": "doc4_sent2",
+  "source_id": "hotpotqa_doc4_sent2",
+  "question": "What dosage was used?",
+  "raw_text": "Dosage changed from 5mg to 50mg.",
+  "summary_text": "Dosage changed; exact values omitted.",
+  "summary_cues": ["dosage", "changed", "exact values omitted"],
+  "split": "train"
+}
 ```
 
-cue-preserving summary 最小规则：
+cue-preserving summary 最小要求：
 
 ```text
-保留实体名
-保留数字/日期/时间
-保留关系触发词
-对精确值使用 “exact values in raw span”
-保留 source_id
+entity cue
+relation cue
+omission signal
+source_id
 ```
 
-验收：
+## 5. Phase 2: Rendering And Rollouts
+
+脚本：
 
 ```text
-summary_cues 非空
-source_id 非空
-raw_text 非空
-summary_text 非空
-cue_preservation_rate 可计算
-```
-
-### Phase 2: Renderer And Rollout Runner
-
-目标：给定 disclosure actions，渲染 fixed-budget prompt 并调用固定主模型/模拟模型。
-
-模块：
-
-```text
-disclosure.renderer
 scripts/run_disclosure_rollouts.py
 ```
 
-渲染规则：
+渲染：
 
 ```text
-HIDE -> no text
-KEEP_SUMMARY -> summary_text
-EXPAND_TO_RAW -> raw_text, optionally with summary header
+EXPAND -> raw_text
+KEEP   -> summary_text
+DROP   -> nothing
 ```
 
-首版 rollout policy：
+K rollout 生成：
 
 ```text
 rule policy
-random budget-aware policy
-epsilon perturbation policy
-HF policy later
-```
-
-K rollout 生成方式：
-
-```text
-temperature over actions
-epsilon hide/expand perturbation
-different token budgets
-rule perturbation
+random perturbation
+budget perturbation
+later HF policy
 ```
 
 输出：
@@ -286,18 +184,15 @@ data/disclosure/answers_train.jsonl
 
 ```text
 same task has K rollout ids
-rendered prompt obeys token budget
-each action map contains all candidate span ids
+each rollout has action map
+rendered prompt obeys budget
 ```
 
-### Phase 3: Evaluator
+## 6. Phase 3: Evaluation
 
-目标：固定 evaluator 判断 answer quality 和 evidence metrics。
-
-模块：
+脚本：
 
 ```text
-disclosure.metrics
 scripts/evaluate_disclosure_policy.py
 ```
 
@@ -314,89 +209,60 @@ cue_preservation_rate
 token_budget_usage
 ```
 
-HotpotQA 首版：
-
-```text
-answer EM/F1
-supporting fact overlap
-supporting source expanded or summarized
-```
-
 验收：
 
 ```text
-metrics.json 可生成
-每个 rollout 有 success/failure label
-每个 span 可回溯 action 与 source_id
+runs/disclosure_eval/metrics.json
+runs/disclosure_eval/analysis_report.md
 ```
 
-### Phase 4: Batched Teacher Review
+## 7. Phase 4: Batched Teacher Review
 
-目标：从成功/失败 rollout 生成 source-grounded target_action。
-
-模块：
+脚本：
 
 ```text
-disclosure.teacher_review
-disclosure.contrastive_builder
 scripts/build_disclosure_teacher_targets.py
 ```
 
-teacher 输入不是 full raw context，而是：
+teacher 输入：
 
 ```text
 question
-candidate summary
-student action
+summary_text
+student_action
 model answer
 gold/verifier outcome
-optional contrastive action difference
-optional local raw_text for selected candidate
+optional contrastive rollout difference
+optional local raw_text
 ```
 
-target action：
+teacher 输出：
 
-```text
-HIDE
-KEEP_SUMMARY
-EXPAND_TO_RAW
-```
-
-label source：
-
-```text
-teacher_only
-contrastive_rollout
-gold_support
-verifier_evidence
-counterfactual
-```
-
-输出：
-
-```text
-data/disclosure/teacher_targets_train.jsonl
-data/disclosure/teacher_review_report_train.json
+```json
+{
+  "student_action": "KEEP",
+  "target_action": "EXPAND",
+  "label_source": "teacher_only",
+  "quoted_summary": "Dosage changed; exact values omitted.",
+  "quoted_raw": "Dosage changed from 5mg to 50mg.",
+  "verifiable_reason": "The question asks exact dosage values."
+}
 ```
 
 验收：
 
 ```text
-target_action 合法
-quoted_summary 非空
-verifiable_reason 非空
-source_id 非空
-teacher 不接收完整 long raw context
+target_action in EXPAND/KEEP/DROP
+quoted_summary non-empty
+verifiable_reason non-empty
+teacher never receives full raw long context
 ```
 
-### Phase 5: Slime SFT Export
+## 8. Phase 5: Slime SFT Export
 
-目标：把 teacher targets 转成 slime-compatible SFT 数据。
-
-模块：
+脚本：
 
 ```text
-disclosure.slime_sft_builder
 scripts/export_disclosure_slime_jsonl.py
 ```
 
@@ -407,45 +273,29 @@ data/slime/disclosure_train.jsonl
 data/slime/disclosure_validation.jsonl
 ```
 
-prompt template：
-
-```text
-Question:
-{question}
-
-Candidate summary:
-{summary_text}
-
-Summary cues:
-{summary_cues}
-
-Budget left:
-{budget_left}
-
-Current model answer/outcome:
-{optional_train_only_outcome}
-
-Choose exactly one action:
-HIDE, KEEP_SUMMARY, EXPAND_TO_RAW
-```
-
-response：
+record：
 
 ```json
-{"action":"EXPAND_TO_RAW"}
+{
+  "prompt": "Question: ...\nCandidate summary: ...\nChoose one action: EXPAND, KEEP, DROP.",
+  "response": "{\"action\":\"EXPAND\"}",
+  "metadata": {
+    "task_id": "hotpotqa_0001",
+    "span_id": "doc4_sent2",
+    "target_action": "EXPAND"
+  }
+}
 ```
 
 验收：
 
 ```text
-response token mask only covers action JSON
-metadata contains task_id/span_id/source_id/label_source
-JSONL can be consumed by local HF trainer and slime rollout bridge
+response-token loss mask only covers action JSON
+metadata includes task_id/span_id/source_id/label_source
+local compatibility Sample can be built
 ```
 
-### Phase 6: Local HF Training
-
-目标：在没有完整 slime launcher 时，先用 Transformers 跑通单卡 CE/SFT。
+## 9. Phase 6: Local HF Training
 
 脚本：
 
@@ -453,62 +303,41 @@ JSONL can be consumed by local HF trainer and slime rollout bridge
 scripts/train_disclosure_hf_local.py
 ```
 
-输入：
+命令：
 
-```text
---model-path /public/huggingface-models/Qwen/Qwen3-0.6B
---train-jsonl data/slime/disclosure_train.jsonl
---eval-jsonl data/slime/disclosure_validation.jsonl
-```
-
-输出：
-
-```text
-checkpoints/disclosure_policy_hf/
-runs/disclosure_hf_train/metrics.json
+```bash
+python scripts/train_disclosure_hf_local.py \
+  --model-path /public/huggingface-models/Qwen/Qwen3-0.6B \
+  --train-jsonl data/slime/disclosure_train.jsonl \
+  --eval-jsonl data/slime/disclosure_validation.jsonl
 ```
 
 验收：
 
 ```text
-loss finite
-action accuracy > random baseline
-checkpoint optionally saved
+finite loss
+action accuracy above random baseline
+metrics_before.json and metrics_after.json
 ```
 
-### Phase 7: Slime Integration
+## 10. Phase 7: Slime Integration
 
-目标：把同一份 disclosure JSONL 接入 slime。
-
-脚本：
+新增：
 
 ```text
+disclosure/slime_rollout.py
 scripts/train_disclosure_slime.py
+scripts/run_disclosure_slime_qwen3_0_6b.sh
 ```
 
-首版使用 slime SFT loss：
+slime hook：
 
 ```text
 --rollout-function-path disclosure.slime_rollout.generate_rollout_disclosure
 --loss-type sft_loss
 ```
 
-需要新增：
-
-```text
-disclosure/slime_rollout.py
-```
-
-rollout 函数职责：
-
-```text
-read disclosure SFT JSONL
-tokenize prompt/response
-build loss_mask over response only
-return slime Sample / local compatibility sample
-```
-
-远端运行目标：
+远端命令：
 
 ```bash
 cd /root/CM-OPD/research-automation/slime-context-manager
@@ -525,22 +354,31 @@ no NaN loss
 eval before/after checkpoint runs
 ```
 
-### Phase 8: End-To-End HF Dataset Run
+## 11. Phase 8: Main Experiments
 
-目标：不是 toy smoke，而是基于 HF 数据集跑完整链路。
+任务：
 
-命令目标：
-
-```bash
-python scripts/build_disclosure_dataset.py --dataset hotpotqa/hotpot_qa --config distractor --split train --max-rows 200
-python scripts/run_disclosure_rollouts.py --split train --k-rollouts 4
-python scripts/build_disclosure_teacher_targets.py --split train
-python scripts/export_disclosure_slime_jsonl.py --split train
-python scripts/train_disclosure_hf_local.py --model-path /public/huggingface-models/Qwen/Qwen3-0.6B
-python scripts/evaluate_disclosure_policy.py --checkpoint checkpoints/disclosure_policy_hf --split validation
+```text
+HotpotQA
+2WikiMultiHopQA
+Qasper
 ```
 
-验收报告：
+Killer 1：
+
+```text
+same summaries + same model + same budget
+summary-only vs rule expand vs learned expand
+```
+
+Killer 2：
+
+```text
+same selected spans + same summaries + same budget
+KEEP vs EXPAND
+```
+
+输出：
 
 ```text
 runs/disclosure_hf/metrics_before.json
@@ -549,35 +387,9 @@ runs/disclosure_hf/expansion_analysis.md
 runs/disclosure_hf/plots/*.svg
 ```
 
-## 5. Slime-Specific Build Order
+## 12. Build Order
 
-优先级：
-
-```text
-1. disclosure.schemas
-2. disclosure.slime_sft_builder
-3. disclosure.slime_rollout local compatibility stubs
-4. unit tests for Sample contract
-5. train_disclosure_hf_local.py
-6. train_disclosure_slime.py command generator
-7. remote slime launcher
-```
-
-不要先做：
-
-```text
-GRPO reward
-custom loss
-teacher top-k logprobs
-main LLM fine-tuning
-ALFWorld / ScienceWorld rollout
-```
-
-这些会等 CE/SFT 路径稳定后再加。
-
-## 6. Near-Term Code Tasks
-
-第一批 PR / commit 应完成：
+第一批：
 
 ```text
 disclosure/schemas.py
@@ -608,21 +420,16 @@ disclosure/slime_rollout.py
 scripts/train_disclosure_hf_local.py
 scripts/train_disclosure_slime.py
 scripts/evaluate_disclosure_policy.py
-remote run_disclosure_slime_qwen3_0_6b.sh
+scripts/run_disclosure_slime_qwen3_0_6b.sh
 ```
 
-## 7. Migration Notes
+## 13. Migration Table
 
-旧名到新名：
-
-| Legacy | New |
+| Legacy | vNext |
 |---|---|
-| `ContextActionSample` | `DisclosureSample` |
-| `MemoryItem` | `CandidateSpan` |
-| `gold_action` | `target_action` |
-| `PIN/KEEP/COMPRESS/DROP` | `HIDE/KEEP_SUMMARY/EXPAND_TO_RAW` |
-| `context_actions_*.jsonl` | `disclosure_*.jsonl` |
-| `Visibility OPD` | compatibility path |
-| `FASD-Mem` | deprecated framing |
-
-旧测试可以保留，但新测试必须覆盖 progressive disclosure 主路径。
+| memory item | context span |
+| visibility | disclosure |
+| raw/summary/hidden | expand/keep/drop |
+| useful information | expansion-worthy evidence |
+| self-distillation | outcome-aware policy refinement |
+| context_actions_*.jsonl | disclosure_*.jsonl |

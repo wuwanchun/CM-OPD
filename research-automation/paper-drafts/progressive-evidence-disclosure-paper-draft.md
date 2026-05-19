@@ -1,0 +1,217 @@
+# Learning When to Expand: Progressive Evidence Disclosure for Long-Context Reasoning
+
+## Abstract
+
+Long-context reasoning systems often face a difficult trade-off: fully expanded raw evidence preserves details but wastes limited context budget, while compressed summaries are cheaper but may omit facts that are critical for answering a question. Existing compression and retrieval pipelines usually decide which context to show, but they rarely model a more specific control problem: when is a summary insufficient, and when should the system disclose the underlying raw evidence? We introduce Progressive Evidence Disclosure, a summary-first framework for long-context reasoning. The system first converts long contexts into cue-preserving summaries, then a learned disclosure policy decides for each span whether to `EXPAND` it into raw evidence, `KEEP` the summary, or `DROP` it from the prompt. The main reasoning model, retriever, summary generator, token budget, and evaluator are fixed; only the disclosure policy changes. The policy is refined by outcome-aware teacher review: after a rollout succeeds or fails, a hindsight reviewer inspects the summary-level view, selected raw evidence, task outcome, and optional contrastive runs to propose policy-improvement targets. These targets are not treated as objective ground truth about usefulness; their value is tested by whether the trained policy improves held-out answer quality, evidence preservation, and token efficiency. We propose experiments on HotpotQA, 2WikiMultiHopQA, and Qasper, with all empirical results left as `TBD` until measured.
+
+## 1. Introduction
+
+Large language models can process increasingly long contexts, but long context alone does not guarantee reliable reasoning. In many tasks, the failure mode is not merely that the answer is outside the model window. The relevant information is technically present, yet buried among irrelevant paragraphs, compressed into a vague summary, or rendered at a level of detail that is insufficient for the downstream question. A multi-hop question may require an exact entity, number, relation, or source sentence. A summary can preserve the topic while losing the precise evidence needed for a final answer.
+
+This paper studies a narrow but important control problem in long-context reasoning. Given a long input represented first as compressed summaries, can a model learn when those summaries are insufficient and raw evidence should be disclosed? We call this problem Progressive Evidence Disclosure. The key design choice is to avoid treating raw evidence and summaries as static alternatives. Instead, the system starts from a summary-first view and learns an escalation policy. For each candidate span, the policy can disclose raw text, retain only the summary, or omit the span entirely.
+
+This framing differs from general context compression. A compressor tries to reduce the input while preserving as much relevant content as possible. Progressive disclosure asks when the compressed view itself should be considered inadequate. It also differs from retrieval and reranking. A retriever decides which span enters the candidate set; our policy decides how a selected span should be rendered under a fixed budget. The same span may be harmless as a summary in one task but require raw disclosure in another.
+
+The central hypothesis is that long-context reasoning can benefit from learning summary insufficiency rather than always expanding more context. A cue-preserving summary should act as a pointer to raw evidence, not as a final replacement for that evidence. For example, a poor summary of "Dosage changed from 5mg to 50mg" might say "The trial procedure changed", which hides the reason to inspect the raw text. A better summary says "Dosage changed; exact values omitted", which preserves enough cues for an expansion policy to decide that raw evidence may be necessary.
+
+We train the disclosure policy with outcome-aware refinement. After the main model answers a task, a teacher reviewer sees the summary-level context, the disclosed raw evidence, the model answer, and the train-split outcome. The reviewer proposes corrections such as "this summary should have been expanded because the question asks for exact dosage values" or "this raw expansion wasted budget because the summary already contained the needed relation." The reviewer is not assumed to identify objective useful spans. Instead, it provides policy-improvement targets, and the final validity of these targets is evaluated through held-out task performance.
+
+Our contributions are threefold. First, we formulate summary-first long-context reasoning as a progressive disclosure problem rather than a memory management or general useful-information selection problem. Second, we introduce a learned expansion policy over `EXPAND`, `KEEP`, and `DROP` actions, where `EXPAND` is an escalation from summary to raw evidence. Third, we propose outcome-aware policy refinement that uses success and failure feedback to improve disclosure decisions while keeping the main reasoning model, retriever, summaries, and token budget fixed.
+
+## 2. Related Work
+
+Long-context reasoning has inspired a wide range of approaches that increase model context length, retrieve external documents, compress prompts, or build agent memory systems. Progressive Evidence Disclosure is complementary to these directions but asks a more specific question: when does a summary become insufficient and need raw evidence?
+
+Prompt compression methods such as LLMLingua and LongLLMLingua reduce the number of tokens passed to the model. Their goal is to remove or compress tokens while preserving downstream performance. Progressive disclosure starts from compressed summaries but introduces a control layer that can selectively restore raw evidence when the compressed representation is too coarse. This makes the problem budget-sensitive but not identical to compression.
+
+Retrieval-augmented generation and reranking systems decide which documents or passages to place in the model context. These methods are usually evaluated by whether the selected passages contain supporting evidence. Our setting fixes the candidate spans and studies how they should be rendered: as raw evidence, summary evidence, or no evidence. The most important experiments therefore hold the retrieved spans fixed and vary only the disclosure policy.
+
+Retrieve-and-compress systems such as RECOMP combine selection and compression after retrieval. They show that retrieved text can often be condensed before generation. Progressive disclosure studies the failure case of that assumption. If a summary contains the right topic but omits exact values, relations, or provenance, the policy should learn to expand the raw span.
+
+Incremental exposure and context scheduling methods expose information over multiple steps rather than in one static prompt. Progressive Evidence Disclosure fits this family but focuses on summary-to-raw escalation. The policy does not need to maintain long-term persistent memory, write new memories, or solve forgetting. It only decides how much detail from existing context candidates should be disclosed for the current reasoning task.
+
+Agent memory work studies storage, consolidation, retrieval, and long-term personalization. This paper deliberately avoids that broader claim. A context span in our setting is not a memory item, and the policy is not a memory manager. The contribution is a learned disclosure policy for fixed long-context inputs.
+
+## 3. Problem Formulation
+
+Let a task instance contain a question or instruction `q` and a long context `C`. The context is segmented into candidate spans `S = {s_1, ..., s_n}`. Each span `s_i` has raw text `r_i` and a cue-preserving summary `u_i`. The summary is intended to preserve entity cues, relation cues, and omission cues that indicate what kinds of details are hidden in the raw span.
+
+The disclosure policy `pi_theta` observes the task, span summary, span metadata, and current budget state. For each span it predicts an action from:
+
+| Action | Rendering behavior | Interpretation |
+|---|---|---|
+| `EXPAND` | Render raw text `r_i` | The summary is insufficient; raw evidence should be disclosed. |
+| `KEEP` | Render summary `u_i` | The summary is sufficient for the current task. |
+| `DROP` | Render nothing | The span is not needed under the current budget. |
+
+The rendered prompt is constructed from all selected summaries and raw expansions under a token budget `B`. A fixed main model `M` receives the rendered prompt and produces an answer. The policy is successful if it improves final task performance while preserving supporting evidence and controlling token cost.
+
+The key distinction is that `EXPAND` is not a static label for "important span." It is a budget-sensitive escalation action. A span can be important but not require raw disclosure if the summary already contains the necessary evidence. Conversely, a short raw span may be worth expanding because a summary omits an exact number, date, entity, or relation.
+
+## 4. Method
+
+### 4.1 Summary-First Context
+
+Progressive disclosure begins by converting the long context into summary-first form. The system segments the context into passages, sentences, retrieved chunks, or document sections depending on the dataset. Each span receives a cue-preserving summary. This summary is not meant to replace raw evidence permanently. It is a compact preview that tells the policy what kind of information the raw span contains and what details may be omitted.
+
+The summary generator should preserve three minimal cues. Entity cues indicate which people, places, documents, variables, or objects appear in the span. Relation cues indicate what relation or event connects those entities. Omission cues indicate whether exact values, quotations, dates, formulas, or source-specific details are present in the raw span but not fully expressed in the summary.
+
+For example, the raw sentence "Dosage changed from 5mg to 50mg after the second trial" should not be summarized as "The trial procedure changed." That summary removes the expansion cue. A better summary is "Dosage changed after the second trial; exact values omitted." The policy can then learn that a question asking for dosage values should trigger `EXPAND`.
+
+### 4.2 Progressive Expansion Policy
+
+The disclosure policy maps each summary-level span representation to an action. The minimal input includes the task question, span summary, span type, source identifier, token budget state, and previous disclosure decisions. In the simplest implementation, the policy is a small classifier or a lightweight language model trained with cross-entropy over `EXPAND`, `KEEP`, and `DROP`. The main reasoning model is not updated.
+
+The rendering rule is deterministic:
+
+```text
+EXPAND -> render raw_text
+KEEP   -> render summary_text
+DROP   -> render nothing
+```
+
+The resulting prompt is passed to the fixed reasoning model. This makes the experimental attribution clean: if performance changes, the cause should be the disclosure policy rather than a stronger main model, a different retriever, or a larger budget.
+
+### 4.3 End-to-End Workflow
+
+Figure 1 summarizes the proposed workflow. The system first constructs summary-level context, then selects raw expansions, runs the fixed reasoning model, and uses outcome-aware review to refine the policy.
+
+```mermaid
+flowchart LR
+    accTitle: Progressive Evidence Disclosure
+    accDescr: The workflow starts from long context, builds cue-preserving summaries, learns which summaries should be expanded to raw evidence, and refines the disclosure policy using task outcomes.
+
+    C["Long context"]
+    S["Context spans"]
+    U["Cue-preserving summaries"]
+    P["Disclosure policy<br/>EXPAND / KEEP / DROP"]
+    R["Rendered prompt<br/>summaries + raw expansions"]
+    M["Fixed reasoning model"]
+    O["Answer and outcome"]
+    T["Outcome-aware teacher review"]
+    L["Policy refinement targets"]
+
+    C --> S
+    S --> U
+    U --> P
+    P --> R
+    R --> M
+    M --> O
+    O --> T
+    U --> T
+    R --> T
+    T --> L
+    L --> P
+```
+
+## 5. Outcome-Aware Policy Refinement
+
+The disclosure policy is refined after rollouts. A rollout consists of the summary-first context, the policy's actions, the rendered prompt, the main model answer, and the task outcome on the training split. When the answer is wrong, the teacher reviewer identifies disclosure decisions that may have hidden necessary evidence or wasted budget. When the answer is correct, the reviewer can confirm useful expansions or identify unnecessary raw disclosures.
+
+The teacher is a hindsight reviewer, not a truth oracle. It does not need to read the entire raw long context in one prompt. Instead, it performs batched summary-level review. It can inspect the summary, selected raw evidence, outcome feedback, gold answer on the training split, and optional contrastive runs where different disclosure decisions led to different outcomes. This gives the teacher outcome privilege and contrastive privilege without requiring longer context than the student at inference time.
+
+Each accepted teacher correction must be source-grounded. It should quote the relevant summary, quote the raw evidence when available, name the source identifier, and give a verifiable reason. A correction such as "pay more attention to evidence next time" is not accepted as training data. A valid correction has the form: "Span `doc4_sent2` should be `EXPAND` because the summary says exact dosage values are omitted and the question asks for the exact dosage."
+
+The first training objective is standard action-level cross-entropy:
+
+```text
+L_disclosure = - log pi_theta(a_teacher | q, u_i, state)
+```
+
+where `a_teacher` is the outcome-aware policy-improvement target. If the policy is implemented as a language model that emits action JSON, the loss is applied only to the action tokens. Future variants can add preference learning or group-relative reinforcement learning, but those are not necessary for the first version of the paper.
+
+It is important that teacher targets are not described as ground-truth usefulness labels. They are improvement signals. The method is validated only if the resulting policy improves held-out answer accuracy, evidence recall, and token efficiency.
+
+## 6. Experiments
+
+The experimental protocol is designed to answer one question: under the same summaries, the same main model, the same candidate spans, and the same token budget, does a learned disclosure policy improve long-context reasoning?
+
+### 6.1 Datasets
+
+We propose three main datasets. HotpotQA tests multi-hop evidence selection and supporting fact preservation. 2WikiMultiHopQA tests relation-chain reasoning over multiple entities. Qasper tests question answering over long scientific documents, where summaries can easily hide exact evidence needed for answers. LongBench, MuSiQue, coding traces, legal documents, and biomedical tasks are left for supplementary experiments or future work.
+
+### 6.2 Baselines
+
+The baselines are chosen to separate compression, retrieval, static expansion, and learned disclosure.
+
+| Baseline | Description | Main question answered |
+|---|---|---|
+| Summary-only | Use only cue-preserving summaries. | Are summaries alone sufficient? |
+| Full raw / top-k raw | Render raw text for selected spans until budget is exhausted. | Is always expanding raw better? |
+| Sliding window | Use the most recent or fixed-window context. | Does simple locality solve the task? |
+| BM25 / frozen dense top-k | Retrieve spans with a fixed retriever. | Is retrieval alone enough? |
+| LLMLingua / LongLLMLingua | Compress context with prompt compression. | Is general compression enough? |
+| Rule expand | Expand spans with explicit omission cues or keyword matches. | Is a simple heuristic enough? |
+| Static expansion SFT | Train on non-iterative action labels. | Is outcome-aware refinement necessary? |
+| Ours | Learned Progressive Evidence Disclosure. | Does learned expansion improve reasoning? |
+| Oracle supporting-fact expansion | Expand known supporting facts on train/dev analysis only. | What is the approximate upper bound? |
+
+### 6.3 Main Result Table
+
+All values remain `TBD` until measured.
+
+| Method | HotpotQA EM | HotpotQA F1 | 2Wiki EM | 2Wiki F1 | Qasper F1 | Token budget used |
+|---|---:|---:|---:|---:|---:|---:|
+| Summary-only | TBD | TBD | TBD | TBD | TBD | TBD |
+| Full raw / top-k raw | TBD | TBD | TBD | TBD | TBD | TBD |
+| Sliding window | TBD | TBD | TBD | TBD | TBD | TBD |
+| BM25 / frozen dense top-k | TBD | TBD | TBD | TBD | TBD | TBD |
+| LLMLingua / LongLLMLingua | TBD | TBD | TBD | TBD | TBD | TBD |
+| Rule expand | TBD | TBD | TBD | TBD | TBD | TBD |
+| Static expansion SFT | TBD | TBD | TBD | TBD | TBD | TBD |
+| Ours | TBD | TBD | TBD | TBD | TBD | TBD |
+| Oracle supporting-fact expansion | TBD | TBD | TBD | TBD | TBD | TBD |
+
+### 6.4 Killer Experiment 1: Same Summary, Different Expansion Policy
+
+This experiment fixes the summary generator, candidate spans, retriever, main model, prompt template, and token budget. The only variable is the expansion policy. We compare summary-only prompting, rule-based expansion, static expansion training, and the learned policy. If the learned policy improves answer quality and evidence recall under the same budget, the main claim is supported.
+
+| Expansion policy | Answer EM/F1 | Supporting evidence recall | Missed expansion rate | Unnecessary expansion rate | Token budget used |
+|---|---:|---:|---:|---:|---:|
+| Summary-only | TBD | TBD | TBD | TBD | TBD |
+| Rule expand | TBD | TBD | TBD | TBD | TBD |
+| Static expansion SFT | TBD | TBD | TBD | TBD | TBD |
+| Learned disclosure policy | TBD | TBD | TBD | TBD | TBD |
+
+### 6.5 Killer Experiment 2: Expansion Is Not Reranking
+
+This experiment fixes the selected spans and changes only rendering. The same spans are shown either as summaries or as raw expansions. This tests whether the gain comes from deciding when raw evidence is needed rather than from simply selecting better spans.
+
+| Rendering condition | Selected spans fixed? | Answer EM/F1 | Evidence recall | Token cost |
+|---|---|---:|---:|---:|
+| KEEP summaries | Yes | TBD | TBD | TBD |
+| EXPAND raw evidence | Yes | TBD | TBD | TBD |
+| Learned mixed rendering | Yes | TBD | TBD | TBD |
+
+### 6.6 Ablations
+
+The ablations test the main assumptions behind the method.
+
+| Variant | Purpose | Expected diagnostic |
+|---|---|---|
+| Without omission cues | Tests whether summaries must preserve expansion cues. | Cue loss should increase missed expansions. |
+| Without outcome feedback | Tests whether teacher review needs final outcomes. | Labels should become less targeted. |
+| Without contrastive runs | Tests whether success/failure comparisons improve review quality. | Corrections may become noisier. |
+| Teacher direct labels only | Tests whether teacher targets alone solve the task. | Should reveal the ceiling and bias of review. |
+| Random expansion under same budget | Tests whether any raw disclosure helps. | Should underperform learned expansion. |
+
+### 6.7 Metrics
+
+Answer quality is measured by dataset-standard exact match and F1 when available. Evidence preservation is measured by supporting evidence recall, exact-span preservation, and whether the rendered prompt contains the evidence required by the gold explanation or supporting-fact annotation. Disclosure quality is measured by expansion precision, expansion recall, missed expansion rate, unnecessary expansion rate, and token budget usage. Summary quality is measured by cue preservation rate, especially whether entity, relation, and omission cues remain visible in the summary.
+
+## 7. Limitations
+
+Progressive Evidence Disclosure depends on summary quality. If the summary removes all cues that would indicate a need for raw evidence, the policy cannot reliably decide when to expand. This is why cue-preserving summaries are part of the problem definition rather than an implementation detail.
+
+The teacher review process can be subjective. We do not claim that teacher corrections are objective labels of useful information. They are training signals whose value must be judged by held-out performance. To reduce drift and self-confirmation, accepted corrections should include source identifiers, quoted evidence, and verifiable reasons, and each policy iteration should be evaluated on a fixed held-out split.
+
+The first version focuses on question answering and document reasoning tasks. It does not claim to solve long-term memory, persistent storage, personalization, or agentic state management. Those settings may benefit from the same disclosure idea, but they introduce additional variables that would weaken the clean attribution of the first paper.
+
+## 8. Conclusion
+
+This paper reframes a common long-context failure mode as a disclosure problem. Instead of asking a model to consume fully expanded raw evidence or rely entirely on compressed summaries, we ask it to learn when a summary is insufficient and raw evidence should be disclosed. Progressive Evidence Disclosure keeps the main model, retriever, summaries, and budget fixed, and trains only a lightweight expansion policy over `EXPAND`, `KEEP`, and `DROP`. Outcome-aware review provides policy-improvement targets, while held-out task performance determines whether those targets are useful. The resulting paper studies a specific but important control problem in summary-first long-context reasoning: learning when to expand.
+
+## References To Fill
+
+This draft intentionally leaves bibliographic details as `TBD` rather than inventing citations. The final version should add verified references for prompt compression, long-context reasoning, retrieval-augmented generation, retrieve-and-compress systems, incremental context exposure, and outcome-aware policy refinement.
+

@@ -1,233 +1,264 @@
 # Progressive Evidence Disclosure Training And Evaluation Plan
 
-_Implementation plan for the lightweight summary-to-raw expansion policy. OPD, token distillation, and GRPO hooks are optional extensions; the first runnable path is supervised training of a progressive disclosure policy._
+_vNext：基于 slime 搭建 summary-first 长文本推理训练链路。首版不做 GRPO，不训练主 LLM；只训练外部 disclosure policy，动作空间为 `EXPAND / KEEP / DROP`。_
 
----
-
-For the build-order roadmap, see:
+Roadmap:
 
 ```text
 research-automation/implementation-plans/progressive-disclosure-slime-roadmap.md
 ```
 
+---
+
 ## 1. Goal
 
-The main model and retriever remain frozen. The trainable component is a lightweight policy that decides how each candidate span should be disclosed under a fixed token budget:
+核心工程问题：
 
 ```text
-HIDE
-KEEP_SUMMARY
-EXPAND_TO_RAW
+Given cue-preserving summaries, train a policy to decide when raw evidence should be disclosed.
 ```
 
-Research object:
+固定组件：
 
 ```text
-summary-to-raw escalation policy
+main LLM
+retriever
+summary generator
+prompt template
+token budget
+answer evaluator
 ```
 
-Not the research object:
+训练组件：
 
 ```text
-retriever fine-tuning
-main LLM fine-tuning
-long-term memory management
-new distillation algorithm
+disclosure policy
 ```
 
-## 2. Summary-First Data Model
+动作：
 
-Every candidate span must keep both raw text and a cue-preserving summary:
+```text
+EXPAND  -> render raw_text
+KEEP    -> render summary_text
+DROP    -> render nothing
+```
+
+## 2. Data Model
+
+### 2.1 Context Span
 
 ```json
 {
-  "span_id": "span_001",
+  "task_id": "hotpotqa_0001",
+  "span_id": "doc4_sent2",
   "source_id": "hotpotqa_doc4_sent2",
-  "raw_text": "The dosage changed from 5mg to 50mg after the second trial.",
-  "summary_text": "Dosage changed after second trial; exact values in raw span.",
-  "summary_cues": ["dosage", "changed", "second trial", "exact values"],
-  "action": "KEEP_SUMMARY"
+  "question": "What dosage was used?",
+  "raw_text": "Dosage changed from 5mg to 50mg.",
+  "summary_text": "Dosage changed; exact values omitted.",
+  "summary_cues": ["dosage", "changed", "exact values omitted"],
+  "split": "train"
 }
 ```
 
-The summary is not a final answer substitute. It is a raw-access index. It should preserve:
+### 2.2 Cue-Preserving Summary
+
+summary 不是最终答案材料，而是 raw preview。最少保留：
 
 ```text
 entity cue
 relation cue
-number/time cue or placeholder
-uncertainty cue
-source cue
-raw access handle
+omission signal
+source_id
 ```
 
-Bad summaries should be detected in preprocessing or counted in evaluation:
+例子：
 
 ```text
-bad:  Details about trial procedure.
-good: Dosage changed after second trial; exact values in raw span.
+bad:  Trial procedure changed.
+good: Dosage changed; exact values omitted.
 ```
 
-## 3. Rendering Rules
-
-```text
-HIDE          -> render nothing for this span
-KEEP_SUMMARY  -> render summary_text
-EXPAND_TO_RAW -> render raw_text, optionally preceded by summary_text
-```
-
-The first implementation can train a single action head:
-
-```text
-L = CE(action, target_action)
-```
-
-The paper-facing action space is progressive disclosure.
-
-## 4. Teacher-Guided Label Builder
-
-Teacher review must not assume a full raw long-context prompt. It should use summary-level batched review:
-
-```text
-question
-candidate summary
-current action
-model answer
-gold/verifier outcome on train split
-optional contrastive rollout difference
-optional raw text only when reviewing an expansion candidate
-```
-
-Teacher emits a source-grounded policy-improvement target:
+### 2.3 Disclosure Target
 
 ```json
 {
-  "span_id": "span017",
-  "student_action": "KEEP_SUMMARY",
-  "target_action": "EXPAND_TO_RAW",
+  "decision_id": "hotpotqa_0001_doc4_sent2_r02",
+  "task_id": "hotpotqa_0001",
+  "rollout_id": "hotpotqa_0001_r02",
+  "span_id": "doc4_sent2",
+  "student_action": "KEEP",
+  "target_action": "EXPAND",
   "label_source": "teacher_only",
-  "quoted_summary": "Dosage changed after second trial; exact values in raw span.",
-  "quoted_raw": "The dosage changed from 5mg to 50mg after the second trial.",
-  "verifiable_reason": "The question asks for exact values that are absent from the summary.",
+  "quoted_summary": "Dosage changed; exact values omitted.",
+  "quoted_raw": "Dosage changed from 5mg to 50mg.",
+  "verifiable_reason": "The question asks exact dosage values.",
   "accepted_for_training": true
 }
 ```
 
-Teacher-only labels are allowed in training, but every experiment must track them separately from:
+## 3. Pipeline
 
 ```text
-counterfactual
-gold_support
-verifier_evidence
-contrastive_rollout
+HF dataset
+-> span segmentation
+-> cue-preserving summaries
+-> K disclosure rollouts per task
+-> fixed main LLM answer
+-> evaluator success/failure
+-> batched teacher review
+-> disclosure targets
+-> slime SFT JSONL
+-> local HF CE/SFT
+-> slime SFT integration
+-> held-out evaluation
 ```
 
-## 5. Contrastive Rollout Review Without GRPO
+## 4. Teacher Review
 
-Multiple rollouts are used as a label amplifier, not as GRPO:
+Teacher 是 hindsight reviewer，不是 truth oracle。
+
+teacher 输入：
 
 ```text
-same task -> sample K disclosure plans
--> fixed main model answers each prompt
--> evaluator splits success/failure
--> diff success and failure action maps
--> teacher reviews only differing spans in summary-first batches
--> write source-grounded target_action labels
--> train with CE/SFT
+question
+candidate summary
+student action
+model answer
+gold/verifier outcome on train split
+optional contrastive rollout difference
+optional local raw_text for inspected span
 ```
 
-No GRPO in the first version:
+teacher 输出：
 
 ```text
-no group advantage
-no policy-gradient update
-no reward normalization
+EXPAND / KEEP / DROP
+quoted_summary
+quoted_raw when inspected
+verifiable_reason
+label_source
 ```
 
-## 6. Counterfactual Audit
-
-Optional stronger validation:
+禁止首版使用：
 
 ```text
-hide_expanded_span
-summary_instead_of_raw
-expand_summary_to_raw
+teacher full raw long-context prompt
 ```
 
-Useful audit signals:
+## 5. Contrastive Rollouts Without GRPO
+
+多 rollout 用来增强标注，不用来做 GRPO：
+
+```text
+same task -> K disclosure plans
+-> evaluator marks success/failure
+-> compare action maps
+-> teacher reviews differing summaries
+-> generate better targets
+-> CE/SFT train policy
+```
+
+不做：
+
+```text
+group advantage
+policy-gradient update
+reward normalization
+```
+
+## 6. Slime SFT Format
 
 ```json
 {
-  "counterfactuals": [
-    {"variant": "summary_instead_of_raw", "score_before": 1.0, "score_after": 0.4, "score_delta": 0.6},
-    {"variant": "hide_span", "score_before": 1.0, "score_after": 0.0, "score_delta": 1.0}
-  ]
+  "prompt": "Question: ...\nCandidate summary: ...\nSummary cues: ...\nBudget left: ...\nChoose one action: EXPAND, KEEP, DROP.",
+  "response": "{\"action\":\"EXPAND\"}",
+  "metadata": {
+    "task_id": "hotpotqa_0001",
+    "span_id": "doc4_sent2",
+    "source_id": "hotpotqa_doc4_sent2",
+    "label_source": "teacher_only",
+    "target_action": "EXPAND"
+  }
 }
 ```
 
-Counterfactual audit is not required for every training sample. It is most valuable for:
+slime rollout bridge 补齐：
 
 ```text
-gold supporting facts
-teacher-selected expansion candidates
-success/failure differing spans
-high-cost raw expansions
+tokens
+response_length
+loss_mask
+metadata
 ```
 
-## 7. Dataset Pipeline
+## 7. Scripts To Build
 
-Initial HF datasets:
+第一批：
+
+```text
+scripts/build_disclosure_dataset.py
+scripts/export_disclosure_slime_jsonl.py
+scripts/evaluate_disclosure_policy.py
+```
+
+第二批：
+
+```text
+scripts/run_disclosure_rollouts.py
+scripts/build_disclosure_teacher_targets.py
+```
+
+第三批：
+
+```text
+scripts/train_disclosure_hf_local.py
+scripts/train_disclosure_slime.py
+scripts/run_disclosure_slime_qwen3_0_6b.sh
+```
+
+## 8. Modules To Build
+
+```text
+disclosure/schemas.py
+disclosure/summary_builder.py
+disclosure/renderer.py
+disclosure/teacher_review.py
+disclosure/contrastive_builder.py
+disclosure/slime_sft_builder.py
+disclosure/slime_rollout.py
+disclosure/metrics.py
+```
+
+## 9. Main Experiments
+
+首版只做：
 
 ```text
 HotpotQA
 2WikiMultiHopQA
-MuSiQue
-Qasper / NarrativeQA extension
-LongBench subset extension
+Qasper
 ```
 
-Processing steps:
+Killer experiment 1:
 
 ```text
-download dataset
-split documents into candidate spans
-generate cue-preserving summaries
-build fixed retriever top-k candidates
-run disclosure policy
-render prompt
-evaluate answer
-build teacher targets
-export CE/SFT JSONL
+same summaries
+same retriever
+same budget
+same main model
+compare: summary-only vs rule expand vs learned expand
 ```
 
-## 8. Slime / Local Training Paths
-
-Primary low-resource path:
+Killer experiment 2:
 
 ```text
-Progressive Disclosure CE
+same selected spans
+same summaries
+same budget
+compare: KEEP vs EXPAND
 ```
 
-Compatibility and future paths:
-
-| Path | Status | Purpose |
-|---|---|---|
-| `Progressive Disclosure CE` | primary | Train `HIDE/KEEP_SUMMARY/EXPAND_TO_RAW`. |
-| `Visibility OPD` | compatibility | Reuse older `RAW/SUMMARY/HIDDEN` JSON labels. |
-| `Token OPD` | optional | Attach teacher log-probs to selector output tokens. |
-| `Top-K OPD` | optional | Reverse-KL distillation for slime custom loss. |
-| `GRPO` | future | Use grouped rollouts and process rewards after CE path is stable. |
-
-Reserved slime hooks:
-
-```text
---rollout-function-path opd.opd_rollout.generate_rollout_opd
---custom-rm-path opd.opd_rollout.custom_rm
---loss-type custom_loss
---custom-loss-function-path opd.topk_distillation_loss.topk_distillation_loss_function
-```
-
-## 9. Evaluation Metrics
+## 10. Metrics
 
 ```text
 answer_em_f1
@@ -238,25 +269,63 @@ missed_expansion_rate
 unnecessary_expansion_rate
 cue_preservation_rate
 token_budget_usage
-policy_improvement_delta
-teacher_only_label_rate
 ```
 
-## 10. Test And Acceptance Criteria
+## 11. Tests
 
-- Parser handles `HIDE`, `KEEP_SUMMARY`, `EXPAND_TO_RAW`, unknown actions, and invalid JSON.
-- Cue-preserving summary builder records `summary_cues` and `source_id`.
-- Teacher target builder requires `quoted_summary`, `verifiable_reason`, and `label_source`.
-- Optional raw review is span-local, not full-context.
-- Contrastive rollout builder can diff success/failure action maps.
-- CE sample builder masks only target action tokens.
-- Held-out evaluator runs after every training round.
-- Counterfactual audit computes `hide_span`, `summary_instead_of_raw`, and `expand_summary_to_raw` deltas when enabled.
+```text
+test_disclosure_schemas.py
+test_summary_builder.py
+test_renderer.py
+test_teacher_review.py
+test_contrastive_builder.py
+test_disclosure_slime_export.py
+test_disclosure_metrics.py
+```
 
-## 11. References
+Acceptance:
 
-- OpenClaw-RL OPD README: https://github.com/Gen-Verse/OpenClaw-RL/blob/main/openclaw-opd/README.md
-- slime usage guide: https://github.com/THUDM/slime/blob/main/docs/en/get_started/usage.md
-- LLMLingua: https://arxiv.org/abs/2310.05736
-- LongLLMLingua: https://arxiv.org/abs/2310.06839
-- RECOMP: https://arxiv.org/abs/2310.04408
+```text
+EXPAND / KEEP / DROP parser works
+summary_cues are present
+teacher target has quoted_summary and verifiable_reason
+slime JSONL masks only response action tokens
+K rollout diff finds changed actions
+metrics compute expansion precision/recall
+```
+
+## 12. Slime Integration
+
+首版接 slime SFT：
+
+```text
+--rollout-function-path disclosure.slime_rollout.generate_rollout_disclosure
+--loss-type sft_loss
+```
+
+远端目标：
+
+```bash
+cd /root/CM-OPD/research-automation/slime-context-manager
+CONDA_PREFIX=/root/miniconda3/envs/slime bash scripts/run_disclosure_slime_qwen3_0_6b.sh
+```
+
+不优先做：
+
+```text
+GRPO reward
+custom loss
+teacher top-k logprobs
+main LLM fine-tuning
+ALFWorld / ScienceWorld rollout
+```
+
+## 13. Related Work Boundary
+
+| Work | Boundary |
+|---|---|
+| LLMLingua / LongLLMLingua | compression |
+| RECOMP | retrieve + compress |
+| PRISM | incremental structured memory/revision |
+| RAG / reranking | candidate source/order |
+| This project | learning when compressed summaries are insufficient and raw evidence should be disclosed |
