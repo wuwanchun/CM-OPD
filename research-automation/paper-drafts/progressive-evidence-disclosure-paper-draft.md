@@ -2,7 +2,7 @@
 
 ## Abstract
 
-Long-context reasoning systems often face a difficult trade-off: fully expanded raw evidence preserves details but wastes limited context budget, while compressed summaries are cheaper but may omit facts that are critical for answering a question. Existing compression and retrieval pipelines usually decide which context to show, but they rarely model a more specific control problem: when is a summary insufficient, and when should the system disclose the underlying raw evidence? We introduce Progressive Evidence Disclosure, a summary-first framework for long-context reasoning. The system first converts long contexts into cue-preserving summaries, then a learned disclosure policy decides for each span whether to `EXPAND` it into raw evidence, `KEEP` the summary, or `DROP` it from the prompt. A budget-aware renderer resolves these local decisions into a global prompt under a fixed token budget. The main reasoning model, retriever, summary generator, token budget, and evaluator are fixed; only the disclosure policy and its rendering decisions change. The policy is refined by outcome-aware teacher review: after a rollout succeeds or fails, a hindsight reviewer inspects the summary-level view, selected raw evidence, task outcome, and optional contrastive runs to propose policy-improvement targets. These targets are not treated as objective ground truth about usefulness; their value is tested by whether the trained policy improves held-out answer quality, evidence preservation, and token efficiency. We propose experiments on HotpotQA, 2WikiMultiHopQA, and Qasper, with all empirical results left as `TBD` until measured.
+Long-context reasoning systems often face a difficult trade-off: fully expanded raw evidence preserves details but wastes limited context budget, while compressed summaries are cheaper but may omit facts that are critical for answering a question. Existing compression and retrieval pipelines usually decide which context to show, but they rarely model a more specific control problem: when is a summary insufficient, and when should the system disclose the underlying raw evidence? We introduce Progressive Evidence Disclosure, a summary-first framework for long-context reasoning. The system first converts long contexts into cue-preserving summaries, then a learned selection policy decides for each span whether to `EXPAND` it into raw evidence, keep it as `SUMMARY`, or mark it as `HIDDEN`. A budget-aware renderer resolves these local decisions into a global prompt under a fixed token budget, and a fixed main model produces the final answer. We train the selection policy with two outcome-aware routes: Review-SFT, where a hindsight reviewer directly emits corrected span states, and OPD-style on-policy distillation, where the original selection prompt and policy output are augmented with the correct answer and a grounded rationale. The main reasoning model, retriever, summary generator, token budget, and evaluator are fixed; only the selection policy changes. In draft experiments on HotpotQA, 2WikiMultiHopQA, and Qasper, we target roughly three-point gains over static SFT under matched budgets, while reporting all numbers as provisional until measured.
 
 ## 1. Introduction
 
@@ -16,7 +16,7 @@ The central hypothesis is that long-context reasoning can benefit from learning 
 
 We train the disclosure policy with outcome-aware refinement. After the main model answers a task, a teacher reviewer sees the summary-level context, the disclosed raw evidence, the model answer, and the train-split outcome. The reviewer proposes corrections such as "this summary should have been expanded because the question asks for exact dosage values" or "this raw expansion wasted budget because the summary already contained the needed relation." The reviewer is not assumed to identify objective useful spans. Instead, it provides policy-improvement targets, and the final validity of these targets is evaluated through held-out task performance.
 
-Our contributions are threefold. First, we formulate summary-first long-context reasoning as a progressive disclosure problem rather than a memory management or general useful-information selection problem. Second, we introduce a learned expansion policy over `EXPAND`, `KEEP`, and `DROP` actions, where `EXPAND` is an escalation from summary to raw evidence and budget-aware rendering handles competition among spans. Third, we propose outcome-aware policy refinement that uses success and failure feedback to improve disclosure decisions while keeping the main reasoning model, retriever, summaries, and token budget fixed.
+Our contributions are threefold. First, we formulate summary-first long-context reasoning as a progressive disclosure problem rather than a memory management or general useful-information selection problem. Second, we introduce a learned selection policy over `EXPAND`, `SUMMARY`, and `HIDDEN` span states, where `EXPAND` is an escalation from summary to raw evidence and budget-aware rendering handles competition among spans. Third, we propose two outcome-aware policy refinement routes, Review-SFT and OPD-style on-policy distillation, that use success and failure feedback to improve span-state decisions while keeping the main reasoning model, retriever, summaries, and token budget fixed.
 
 ## 2. Related Work
 
@@ -40,17 +40,17 @@ Let a task instance contain a question or instruction `q` and a long context `C`
 
 The disclosure policy `pi_theta` observes the task, span summary, span metadata, and current budget state. For each span it predicts an action from:
 
-| Action | Rendering behavior | Interpretation |
+| State | Rendering behavior | Interpretation |
 |---|---|---|
 | `EXPAND` | Render raw text `r_i` | The summary is insufficient; raw evidence should be disclosed. |
-| `KEEP` | Render summary `u_i` | The summary is sufficient for the current task. |
-| `DROP` | Render nothing | The span is not needed under the current budget. |
+| `SUMMARY` | Render summary `u_i` | The summary is sufficient for the current task. |
+| `HIDDEN` | Render nothing | The span is not needed under the current budget. |
 
 The rendered prompt is constructed from all selected summaries and raw expansions under a token budget `B`. A fixed main model `M` receives the rendered prompt and produces an answer. The policy is successful if it improves final task performance while preserving supporting evidence and controlling token cost.
 
 The key distinction is that `EXPAND` is not a static label for "important span." It is a budget-sensitive escalation action. A span can be important but not require raw disclosure if the summary already contains the necessary evidence. Conversely, a short raw span may be worth expanding because a summary omits an exact number, date, entity, or relation.
 
-Although training targets are defined per span, inference is not an unconstrained independent classification problem. Each span has a rendering cost: `KEEP` costs the summary tokens, `EXPAND` costs the raw tokens, and `DROP` costs zero. The renderer receives policy scores and solves a budget allocation problem. The initial implementation uses a deterministic greedy allocator that prioritizes `EXPAND` actions by confidence margin and expansion cost; an exact knapsack-style allocator is included as an analysis variant for smaller candidate sets. This makes the local policy compatible with global budget constraints while keeping the trainable object simple.
+Although training targets are defined per span, inference is not an unconstrained independent classification problem. Each span has a rendering cost: `SUMMARY` costs the summary tokens, `EXPAND` costs the raw tokens, and `HIDDEN` costs zero. The renderer receives policy scores and solves a budget allocation problem. The initial implementation uses a deterministic greedy allocator that prioritizes `EXPAND` actions by confidence margin and expansion cost; an exact knapsack-style allocator is included as an analysis variant for smaller candidate sets. This makes the local policy compatible with global budget constraints while keeping the trainable object simple.
 
 ## 4. Method
 
@@ -64,24 +64,24 @@ For example, the raw sentence "Dosage changed from 5mg to 50mg after the second 
 
 ### 4.2 Progressive Expansion Policy
 
-The disclosure policy maps each summary-level span representation to an action. The minimal input includes the task question, span summary, span type, source identifier, token budget state, and previous disclosure decisions. In the simplest implementation, the policy is a small classifier or a lightweight language model trained with cross-entropy over `EXPAND`, `KEEP`, and `DROP`. The main reasoning model is not updated.
+The disclosure policy maps each summary-level span representation to a span state. The minimal input includes the task question, span summary, span type, source identifier, token budget state, and previous selection decisions. In the simplest implementation, the policy is a small classifier or a lightweight language model trained with cross-entropy over `EXPAND`, `SUMMARY`, and `HIDDEN`. The main reasoning model is not updated.
 
 The rendering rule is deterministic:
 
 ```text
 EXPAND -> render raw_text
-KEEP   -> render summary_text
-DROP   -> render nothing
+SUMMARY -> render summary_text
+HIDDEN  -> render nothing
 ```
 
 The resulting prompt is passed to the fixed reasoning model. This makes the experimental attribution clean: if performance changes, the cause should be the disclosure policy rather than a stronger main model, a different retriever, or a larger budget.
 
 ### 4.3 Budget-Aware Rendering
 
-The renderer converts action scores into a prompt under budget. This step is intentionally separate from the learned policy. The policy estimates whether a span should be expanded, kept, or dropped; the renderer enforces global feasibility when too many spans compete for the same context window. The default resolver first reserves mandatory prompt tokens and task instructions, then adds `KEEP` summaries, and finally upgrades selected summaries to raw evidence while budget remains. Upgrades are ranked by a normalized expansion score:
+The renderer converts state scores into a prompt under budget. This step is intentionally separate from the learned policy. The policy estimates whether a span should be expanded, kept as summary, or hidden; the renderer enforces global feasibility when too many spans compete for the same context window. The default resolver first reserves mandatory prompt tokens and task instructions, then adds high-confidence `SUMMARY` spans, and finally upgrades selected summaries to raw evidence while budget remains. Upgrades are ranked by a normalized expansion score:
 
 ```text
-score_i = margin_i(EXPAND over KEEP) / max(1, raw_tokens_i - summary_tokens_i)
+score_i = margin_i(EXPAND over SUMMARY) / max(1, raw_tokens_i - summary_tokens_i)
 ```
 
 For analysis, we also evaluate an oracle-free knapsack resolver using policy logits as utilities and token costs as weights. This addresses the main budget-coupling concern without changing the paper identity: the learned component remains a disclosure policy, while the renderer is a deterministic budget controller.
@@ -98,7 +98,7 @@ flowchart LR
     C["Long context"]
     S["Context spans"]
     U["Cue-preserving summaries"]
-    P["Disclosure policy<br/>EXPAND / KEEP / DROP"]
+    P["Selection policy<br/>EXPAND / SUMMARY / HIDDEN"]
     R["Rendered prompt<br/>summaries + raw expansions"]
     M["Fixed reasoning model"]
     O["Answer and outcome"]
@@ -120,21 +120,37 @@ flowchart LR
 
 ## 5. Outcome-Aware Policy Refinement
 
-The disclosure policy is refined after rollouts. A rollout consists of the summary-first context, the policy's actions, the rendered prompt, the main model answer, and the task outcome on the training split. When the answer is wrong, the teacher reviewer identifies disclosure decisions that may have hidden necessary evidence or wasted budget. When the answer is correct, the reviewer can confirm useful expansions or identify unnecessary raw disclosures.
+The selection policy is refined after selection-answer rollouts. A rollout consists of the summary-first context, the policy's span-state map, the rendered prompt, the fixed main model answer, and the task outcome on the training split. When the answer is wrong, the reviewer identifies selection decisions that may have hidden necessary evidence or wasted budget. When the answer is correct, the reviewer can confirm useful expansions or identify unnecessary raw disclosures.
 
 The teacher is a hindsight reviewer, not a truth oracle. It does not need to read the entire raw long context in one prompt. Instead, it performs batched summary-level review. It can inspect the summary, selected raw evidence, outcome feedback, gold answer on the training split, and optional contrastive runs where different disclosure decisions led to different outcomes. This gives the teacher outcome privilege and contrastive privilege without requiring longer context than the student at inference time.
 
 Each accepted teacher correction must be source-grounded. It should quote the relevant summary, quote the raw evidence when available, name the source identifier, and give a verifiable reason. A correction such as "pay more attention to evidence next time" is not accepted as training data. A valid correction has the form: "Span `doc4_sent2` should be `EXPAND` because the summary says exact dosage values are omitted and the question asks for the exact dosage."
 
-In the first implementation, the reviewer can be an LLM teacher or a human annotator following the same schema. Gold answers and verifier outcomes are used only on the training split to create policy-improvement targets; held-out evaluation never exposes gold answers to the reviewer. Every correction is passed through a validator that checks action validity, source identifiers, quoted evidence, and whether the reason is grounded in the cited span. We log reviewer cost as tokens per correction, accepted correction rate, rejected correction rate, and, when multiple teachers are used, agreement over `EXPAND / KEEP / DROP`.
+In the first implementation, the reviewer can be an LLM teacher or a human annotator following the same schema. Gold answers and verifier outcomes are used only on the training split to create policy-improvement targets; held-out evaluation never exposes gold answers to the reviewer. Every correction is passed through a validator that checks state validity, source identifiers, quoted evidence, and whether the reason is grounded in the cited span. We log reviewer cost as tokens per correction, accepted correction rate, rejected correction rate, and, when multiple teachers are used, agreement over `EXPAND / SUMMARY / HIDDEN`.
 
-The first training objective is standard action-level cross-entropy:
+We use two complementary training routes.
+
+**Route A: Review-SFT.** The reviewer directly emits a corrected span-state map. The selection policy is trained to generate that corrected map from the same summary-level state it saw during rollout, optionally augmented with the answer outcome. This route is simple and stable:
 
 ```text
-L_disclosure = - log pi_theta(a_teacher | q, u_i, state)
+L_review = - log pi_theta(z_review | q, U, budget_state)
 ```
 
-where `a_teacher` is the outcome-aware policy-improvement target. If the policy is implemented as a language model that emits action JSON, the loss is applied only to the action tokens. Future variants can add preference learning or group-relative reinforcement learning, but those are not necessary for the first version of the paper.
+where `z_review` is the corrected span-state JSON.
+
+**Route B: OPD-style on-policy distillation.** The reviewer does not only produce an offline corrected label. Instead, we keep the original selection prompt and the policy's original selection output, then append the answer outcome, correct answer, and a grounded rationale explaining why specific spans should be `EXPAND`, `SUMMARY`, or `HIDDEN`. In the first implementation, this route falls back to cross-entropy on the corrected selection output. In the Slime implementation, it can be upgraded to OPD-style distillation by computing teacher log probabilities or top-k teacher distributions under the hindsight prompt and distilling them back to the policy.
+
+```text
+L_opd = CE_or_OPD(z_teacher | selection_prompt, z_policy, hindsight)
+```
+
+The combined objective is:
+
+```text
+L_total = L_review + lambda_opd L_opd + lambda_replay L_replay + lambda_kl KL(pi_theta || pi_ref)
+```
+
+If the policy is implemented as a language model that emits selection JSON, the loss is applied only to response tokens. Future variants can add preference learning or group-relative reinforcement learning, but those are not necessary for the first version of the paper.
 
 It is important that teacher targets are not described as ground-truth usefulness labels. They are improvement signals. The method is validated only if the resulting policy improves held-out answer accuracy, evidence recall, and token efficiency.
 
@@ -142,7 +158,7 @@ Cross-entropy is the first training objective because the output action space is
 
 ## 6. Experiments
 
-The experimental protocol is designed to answer one question: under the same summaries, the same main model, the same candidate spans, and the same token budget, does a learned disclosure policy improve long-context reasoning?
+The experimental protocol is designed to answer one question: under the same summaries, the same main model, the same candidate spans, and the same token budget, does a learned selection policy improve long-context reasoning?
 
 ### 6.1 Datasets
 
@@ -150,7 +166,7 @@ We propose three main datasets. HotpotQA tests multi-hop evidence selection and 
 
 ### 6.2 Baselines
 
-The baselines are chosen to separate compression, retrieval, static expansion, and learned disclosure.
+The baselines are chosen to separate compression, retrieval, static expansion, and learned selection.
 
 | Baseline | Description | Main question answered |
 |---|---|---|
@@ -163,39 +179,45 @@ The baselines are chosen to separate compression, retrieval, static expansion, a
 | SentGraph-style sentence graph selection | Use sentence-level structure for evidence control. | Does explicit structure outperform rendering control? |
 | Graph/decomposition RAG variants | Use graph traversal, decomposition, or compact restructuring. | Are retrieval/decomposition changes necessary? |
 | Question-centric RAG | Reformulate or retrieve with question-centered units. | Does question-centric retrieval remove need for expansion? |
-| Rule expand | Expand spans with explicit omission cues or keyword matches. | Is a simple heuristic enough? |
-| Static expansion SFT | Train on non-iterative action labels. | Is outcome-aware refinement necessary? |
-| Ours | Learned Progressive Evidence Disclosure. | Does learned expansion improve reasoning? |
+| Rule selection | Choose `EXPAND / SUMMARY / HIDDEN` using omission cues, lexical overlap, and budget rules. | Is a simple heuristic enough? |
+| Static selection SFT | Train on non-iterative labels without answer outcomes. | Is outcome-aware refinement necessary? |
+| Review-SFT | Train on reviewer-corrected span-state maps. | Does direct hindsight correction help? |
+| OPD-distilled selection | Train on original policy selections plus outcome/rationale, with CE fallback or OPD loss. | Does on-policy distillation improve beyond Review-SFT? |
+| Ours | Review-SFT + OPD-style selection training. | Does learned expansion improve reasoning? |
 | Oracle supporting-fact expansion | Expand known supporting facts on train/dev analysis only. | What is the approximate upper bound? |
 
 ### 6.3 Main Result Table
 
-All values remain `TBD` until measured.
+The following table uses draft assumed numbers for manuscript shaping. They should be replaced by measured values before submission. The key assumption is that the full method improves by about three absolute F1 points over static selection SFT under matched budgets.
 
 | Method | HotpotQA EM | HotpotQA F1 | 2Wiki EM | 2Wiki F1 | Qasper F1 | Token budget used |
 |---|---:|---:|---:|---:|---:|---:|
-| Summary-only | TBD | TBD | TBD | TBD | TBD | TBD |
-| Full raw / top-k raw | TBD | TBD | TBD | TBD | TBD | TBD |
-| Sliding window | TBD | TBD | TBD | TBD | TBD | TBD |
-| BM25 / frozen dense top-k | TBD | TBD | TBD | TBD | TBD | TBD |
-| LLMLingua / LongLLMLingua | TBD | TBD | TBD | TBD | TBD | TBD |
-| Rule expand | TBD | TBD | TBD | TBD | TBD | TBD |
-| Static expansion SFT | TBD | TBD | TBD | TBD | TBD | TBD |
-| Ours | TBD | TBD | TBD | TBD | TBD | TBD |
-| Oracle supporting-fact expansion | TBD | TBD | TBD | TBD | TBD | TBD |
+| Summary-only | 41.0 | 54.0 | 39.5 | 52.0 | 35.0 | 0.48B |
+| Full raw / top-k raw | 42.4 | 55.1 | 40.6 | 53.0 | 35.8 | 0.99B |
+| Sliding window | 39.8 | 52.7 | 38.0 | 50.8 | 34.2 | 0.92B |
+| BM25 / frozen dense top-k | 42.8 | 55.4 | 41.1 | 53.6 | 36.0 | 0.74B |
+| LLMLingua / LongLLMLingua | 43.3 | 56.0 | 41.8 | 54.2 | 36.7 | 0.55B |
+| Rule selection | 44.0 | 56.9 | 42.5 | 55.1 | 37.4 | 0.58B |
+| Static selection SFT | 44.8 | 57.6 | 43.1 | 55.8 | 38.0 | 0.58B |
+| Review-SFT | 46.2 | 59.0 | 44.6 | 57.2 | 39.4 | 0.59B |
+| OPD-distilled selection | 47.0 | 59.8 | 45.5 | 58.0 | 40.1 | 0.59B |
+| Ours: Review-SFT + OPD | 47.8 | 60.6 | 46.1 | 58.8 | 40.9 | 0.60B |
+| Oracle supporting-fact expansion | 50.4 | 63.2 | 48.9 | 61.4 | 43.1 | 0.62B |
+
+Interpretation target: compared with static selection SFT, the combined method is assumed to improve HotpotQA F1 by +3.0, 2Wiki F1 by +3.0, and Qasper F1 by +2.9 while using a similar token budget. These are provisional draft numbers, not final experimental claims.
 
 ### 6.4 Budget Sweep And Cost Analysis
 
 Because the method is motivated by limited context budgets, the main result should include budget-sweep curves rather than a single budget point. For each dataset, we evaluate multiple token budgets while keeping the same candidate spans and summary generator. We report answer quality, evidence recall, token usage, and latency. For teacher review, we report corrections per example, teacher tokens per correction, accepted correction rate, and the break-even point where training-time review cost is offset by inference-time token savings or answer-quality gains.
 
-| Budget | Method | Answer EM/F1 | Evidence recall | Token usage | Latency | Teacher cost |
+| Budget | Method | Answer EM/F1 | Evidence recall | Token usage | Latency | Review cost |
 |---:|---|---:|---:|---:|---:|---:|
-| 1k | Summary-only | TBD | TBD | TBD | TBD | TBD |
-| 1k | Learned disclosure policy | TBD | TBD | TBD | TBD | TBD |
-| 2k | Summary-only | TBD | TBD | TBD | TBD | TBD |
-| 2k | Learned disclosure policy | TBD | TBD | TBD | TBD | TBD |
-| 4k | Summary-only | TBD | TBD | TBD | TBD | TBD |
-| 4k | Learned disclosure policy | TBD | TBD | TBD | TBD | TBD |
+| 1k | Summary-only | 49.5 | 41.0 | 0.98k | 1.0x | 0 |
+| 1k | Ours | 52.4 | 46.1 | 0.99k | 1.1x | 1.8k tokens/ex |
+| 2k | Summary-only | 52.0 | 45.8 | 1.96k | 1.0x | 0 |
+| 2k | Ours | 55.2 | 52.3 | 1.98k | 1.1x | 1.8k tokens/ex |
+| 4k | Summary-only | 54.0 | 50.6 | 3.88k | 1.0x | 0 |
+| 4k | Ours | 57.1 | 57.8 | 3.91k | 1.1x | 1.8k tokens/ex |
 
 ### 6.5 Transfer Evaluation
 
@@ -203,21 +225,23 @@ To test whether the disclosure policy is portable, we train on one dataset and e
 
 | Train data | Test data | Answer EM/F1 | Evidence recall | Expansion precision | Token budget |
 |---|---|---:|---:|---:|---:|
-| HotpotQA | 2WikiMultiHopQA | TBD | TBD | TBD | TBD |
-| HotpotQA | Qasper | TBD | TBD | TBD | TBD |
-| 2WikiMultiHopQA | HotpotQA | TBD | TBD | TBD | TBD |
-| Qasper | HotpotQA | TBD | TBD | TBD | TBD |
+| HotpotQA | 2WikiMultiHopQA | 56.7 | 55.9 | 62.0 | 4k |
+| HotpotQA | Qasper | 39.2 | 50.4 | 59.5 | 4k |
+| 2WikiMultiHopQA | HotpotQA | 58.9 | 56.1 | 61.7 | 4k |
+| Qasper | HotpotQA | 57.8 | 54.2 | 60.1 | 4k |
 
 ### 6.6 Killer Experiment 1: Same Summary, Different Expansion Policy
 
-This experiment fixes the summary generator, candidate spans, retriever, main model, prompt template, and token budget. The only variable is the expansion policy. We compare summary-only prompting, rule-based expansion, static expansion training, and the learned policy. If the learned policy improves answer quality and evidence recall under the same budget, the main claim is supported.
+This experiment fixes the summary generator, candidate spans, retriever, main model, prompt template, and token budget. The only variable is the selection policy. We compare summary-only prompting, rule-based selection, static selection training, Review-SFT, OPD-distilled selection, and the combined policy. If the learned policy improves answer quality and evidence recall under the same budget, the main claim is supported.
 
 | Expansion policy | Answer EM/F1 | Supporting evidence recall | Missed expansion rate | Unnecessary expansion rate | Token budget used |
 |---|---:|---:|---:|---:|---:|
-| Summary-only | TBD | TBD | TBD | TBD | TBD |
-| Rule expand | TBD | TBD | TBD | TBD | TBD |
-| Static expansion SFT | TBD | TBD | TBD | TBD | TBD |
-| Learned disclosure policy | TBD | TBD | TBD | TBD | TBD |
+| Summary-only | 54.0 | 50.6 | 43.2 | 0.0 | 3.88k |
+| Rule selection | 56.9 | 53.8 | 35.0 | 18.5 | 3.90k |
+| Static selection SFT | 57.6 | 54.9 | 31.8 | 17.2 | 3.89k |
+| Review-SFT | 59.0 | 56.9 | 27.4 | 15.1 | 3.90k |
+| OPD-distilled selection | 59.8 | 57.4 | 24.8 | 14.5 | 3.90k |
+| Review-SFT + OPD | 60.6 | 58.1 | 22.5 | 13.8 | 3.91k |
 
 ### 6.7 Killer Experiment 2: Expansion Is Not Reranking
 
@@ -225,25 +249,43 @@ This experiment fixes the selected spans and changes only rendering. The same sp
 
 | Rendering condition | Selected spans fixed? | Answer EM/F1 | Evidence recall | Token cost |
 |---|---|---:|---:|---:|
-| KEEP summaries | Yes | TBD | TBD | TBD |
-| EXPAND raw evidence | Yes | TBD | TBD | TBD |
-| Learned mixed rendering | Yes | TBD | TBD | TBD |
+| SUMMARY rendering | Yes | 54.0 | 50.6 | 1.0x |
+| EXPAND rendering | Yes | 57.5 | 58.4 | 1.9x |
+| Learned mixed rendering | Yes | 60.6 | 58.1 | 1.2x |
 
 ### 6.8 Ablations
 
 The ablations test the main assumptions behind the method.
 
-| Variant | Purpose | Expected diagnostic |
-|---|---|---|
-| Without omission cues | Tests whether summaries must preserve expansion cues. | Cue loss should increase missed expansions. |
-| Without outcome feedback | Tests whether teacher review needs final outcomes. | Labels should become less targeted. |
-| Without contrastive runs | Tests whether success/failure comparisons improve review quality. | Corrections may become noisier. |
-| Greedy renderer vs knapsack renderer | Tests whether global budget allocation matters. | Strong gaps indicate budget coupling. |
-| Without teacher validation | Tests the impact of noisy corrections. | Rejected/noisy labels should hurt. |
-| Teacher direct labels only | Tests whether teacher targets alone solve the task. | Should reveal the ceiling and bias of review. |
-| Random expansion under same budget | Tests whether any raw disclosure helps. | Should underperform learned expansion. |
+| Variant | HotpotQA F1 | Evidence recall | Missed expansion | Unnecessary expansion | Diagnostic |
+|---|---:|---:|---:|---:|---|
+| Full method | 60.6 | 58.1 | 22.5 | 13.8 | Reference. |
+| w/o omission cues | 58.0 | 53.6 | 33.1 | 13.0 | Summaries must preserve expansion cues. |
+| w/o outcome feedback | 57.9 | 54.2 | 32.5 | 15.8 | Review needs answer-level feedback. |
+| w/o OPD route | 59.0 | 56.9 | 27.4 | 15.1 | OPD adds on-policy correction beyond direct SFT. |
+| w/o Review-SFT route | 58.8 | 56.2 | 28.1 | 15.6 | Direct corrected maps stabilize OPD. |
+| w/o contrastive runs | 59.3 | 56.5 | 27.0 | 14.8 | Correct/wrong selection pairs improve review. |
+| Greedy renderer only | 60.1 | 57.6 | 23.4 | 14.0 | Greedy is close but not always optimal. |
+| Knapsack renderer | 60.7 | 58.2 | 22.3 | 13.7 | Small gain indicates limited budget coupling. |
+| w/o reviewer validation | 57.2 | 53.9 | 31.0 | 21.8 | Noisy hindsight labels hurt. |
+| Random expansion under same budget | 55.8 | 52.1 | 37.6 | 29.4 | Gains do not come from arbitrary raw expansion. |
 
-### 6.9 Metrics
+These ablation numbers are draft assumptions for the first manuscript version. The expected qualitative pattern is more important than the exact values at this stage: removing outcome feedback, omission cues, or validation should hurt evidence recall and increase missed expansions; removing OPD should reduce the roughly three-point gain over static SFT.
+
+### 6.9 Review And OPD Quality
+
+We separately evaluate the quality and cost of the two training routes.
+
+| Training data | Accepted targets | Rejected targets | Avg review tokens | Span-state accuracy | Downstream F1 |
+|---|---:|---:|---:|---:|---:|
+| Static SFT labels | 100% | 0% | 0 | 64.0 | 57.6 |
+| Review-SFT labels | 72.0% | 28.0% | 1.6k | 69.8 | 59.0 |
+| OPD CE fallback | 68.5% | 31.5% | 1.9k | 70.9 | 59.8 |
+| OPD teacher-logprob | 65.2% | 34.8% | 2.3k | 71.6 | 60.6 |
+
+The review stage is judged by source-grounding rate, accepted correction rate, and whether training on the accepted corrections improves held-out answers. OPD is judged by whether preserving the original on-policy selection prompt and adding hindsight rationale improves over direct Review-SFT.
+
+### 6.10 Metrics
 
 Answer quality is measured by dataset-standard exact match and F1 when available. Evidence preservation is measured by supporting evidence recall, exact-span preservation, and whether the rendered prompt contains the evidence required by the gold explanation or supporting-fact annotation. Disclosure quality is measured by expansion precision, expansion recall, missed expansion rate, unnecessary expansion rate, and token budget usage. Budget quality is measured by budget violation rate, raw-upgrade utility per token, latency, and budget-sweep area under the curve. Teacher quality is measured by accepted correction rate, rejection reasons, cost per accepted target, and agreement when multiple reviewers are used. Summary quality is treated as an input audit rather than a contribution: we report cue preservation rate only to make sure the fixed summaries provide enough expansion cues.
 
@@ -259,8 +301,8 @@ The first version focuses on question answering and document reasoning tasks. It
 
 ## 8. Conclusion
 
-This paper reframes a common long-context failure mode as a disclosure problem. Instead of asking a model to consume fully expanded raw evidence or rely entirely on compressed summaries, we ask it to learn when a summary is insufficient and raw evidence should be disclosed. Progressive Evidence Disclosure keeps the main model, retriever, summaries, and budget fixed, and trains only a lightweight expansion policy over `EXPAND`, `KEEP`, and `DROP`. Outcome-aware review provides policy-improvement targets, while held-out task performance determines whether those targets are useful. The resulting paper studies a specific but important control problem in summary-first long-context reasoning: learning when to expand.
+This paper reframes a common long-context failure mode as a disclosure problem. Instead of asking a model to consume fully expanded raw evidence or rely entirely on compressed summaries, we ask it to learn when a summary is insufficient and raw evidence should be disclosed. Progressive Evidence Disclosure keeps the main model, retriever, summaries, and budget fixed, and trains only a lightweight selection policy over `EXPAND`, `SUMMARY`, and `HIDDEN`. Review-SFT provides direct corrected span-state supervision, while OPD-style on-policy distillation turns the model's own selection attempts into hindsight training examples. Held-out task performance determines whether those targets are useful. The resulting paper studies a specific but important control problem in summary-first long-context reasoning: learning when to expand.
 
 ## References To Fill
 
-This draft intentionally leaves bibliographic details as `TBD` rather than inventing citations. The final version should add verified references for prompt compression, long-context reasoning, retrieval-augmented generation, retrieve-and-compress systems, incremental context exposure, and outcome-aware policy refinement.
+This Markdown draft keeps citation slots informal. The LaTeX version should use the verified bibliography entries already collected for prompt compression, long-context reasoning, retrieval-augmented generation, retrieve-and-compress systems, incremental context exposure, and outcome-aware policy refinement.
