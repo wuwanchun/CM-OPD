@@ -1,4 +1,4 @@
-# Progressive Evidence Disclosure Slime Roadmap
+﻿# Progressive Evidence Disclosure Slime Roadmap
 
 _本文档把 `Learning When to Expand: Progressive Evidence Disclosure for Long-Context Reasoning` 落成基于 Slime + SGLang 的工程路线。主线是 summary-first 长文本推理中的外部 `selection policy`：原始数据先切成 span 并生成 summary，policy 在 SGLang 上多次为同一样本选择每个 span 的状态，renderer 拼接上下文，SGLang 主模型执行 answer，之后 policy 走两条训练路线：Review-SFT 和 OPD-style on-policy distillation。最终训练与正式评测都必须在 Slime 框架内运行；本地 HF 只作为可选 schema/debug 路径。_
 
@@ -36,7 +36,7 @@ selection policy
 | 工程术语 | 作用 | 对应论文动作 |
 |---|---|---|
 | `summary` | 对每个原始 span 生成 cue-preserving summary，作为 selection 的低分辨率输入。 | summary-first context |
-| `selection` | policy model 为每个 span 选择状态：`HIDDEN / SUMMARY / RAW`。 | `DROP / KEEP / EXPAND` |
+| `selection` | policy model 为每个 span 选择状态：`EXPAND / SUMMARY / HIDDEN`。 | `EXPAND / SUMMARY / HIDDEN` |
 | `answer` | main model 读取 selection 渲染后的上下文并输出最终答案。 | fixed downstream reasoning |
 | `review` | policy/reviewer 基于正确答案、错误答案和 selection 结果产生训练信号。 | outcome-aware refinement |
 | `Review-SFT` | reviewer 直接输出新的 span 状态选择，训练 policy 做纯 SFT。 | corrected selection imitation |
@@ -46,9 +46,9 @@ selection policy
 
 | Span state | 渲染内容 | 论文动作 |
 |---|---|---|
-| `RAW` | 展示原始 span 文本 | `EXPAND` |
-| `SUMMARY` | 只展示 summary | `KEEP` |
-| `HIDDEN` | 不放入 answer prompt | `DROP` |
+| `EXPAND` | 展开并展示原始 span 文本 | `EXPAND` |
+| `SUMMARY` | 只展示 summary | `SUMMARY` |
+| `HIDDEN` | 不放入 answer prompt | `HIDDEN` |
 
 训练闭环不是一次性离线 SFT，而是迭代式 self-training：
 
@@ -77,8 +77,8 @@ raw dataset -> span summary
 | Action | Rendered context | 含义 |
 |---|---|---|
 | `EXPAND` | `raw_text` | summary 信息不足，需要展开原文证据。 |
-| `KEEP` | `summary_text` | summary 已足够支持当前推理。 |
-| `DROP` | nothing | 当前 span 无关或预算不允许展示。 |
+| `SUMMARY` | `summary_text` | summary 已足够支持当前推理。 |
+| `HIDDEN` | nothing | 当前 span 无关或预算不允许展示。 |
 
 首版训练目标：
 
@@ -94,7 +94,7 @@ L_selection = CE(target_state | selection_state_onpolicy)
 推理时必须额外有一个确定性的 budget-aware renderer，负责把 per-span action scores 变成全局可行 prompt：
 
 ```text
-policy scores over RAW/SUMMARY/HIDDEN
+policy scores over EXPAND/SUMMARY/HIDDEN
 -> budget-aware renderer
 -> final rendered prompt under token_budget
 ```
@@ -121,7 +121,7 @@ flowchart LR
     SEG["Span segmentation"]
     SUM["Span summaries<br/>cue-preserving"]
     SEL["Selection on SGLang<br/>π_t samples N state maps"]
-    REN["Renderer<br/>HIDDEN / SUMMARY / RAW"]
+    REN["Renderer<br/>EXPAND / SUMMARY / HIDDEN"]
     LLM["Answer on SGLang<br/>fixed main model"]
     EVAL["Answer evaluator"]
     REV["Review<br/>correct/wrong answer + evidence"]
@@ -156,7 +156,7 @@ different selection policy
 | 用途 | 是否必须 | 作用 |
 |---|---|---|
 | on-policy distillation | 必须至少 1 条来自当前 `π_t` 的 selection | 让 policy 在自己真实会遇到的状态上学习 corrected state map。 |
-| contrastive review | 可选，建议 N>1 | 同题多个 selection 产生正确/错误 answer 差异，辅助 reviewer 判断哪个 span 应该 `RAW / SUMMARY / HIDDEN`。 |
+| contrastive review | 可选，建议 N>1 | 同题多个 selection 产生正确/错误 answer 差异，辅助 reviewer 判断哪个 span 应该 `EXPAND / SUMMARY / HIDDEN`。 |
 
 因此不做 GRPO 时也可以运行：`N=1 current-policy selection -> answer -> review -> CE/OPD distillation`。多条 selection 只是提升 review 质量，不是训练算法的必要条件。
 
@@ -287,7 +287,7 @@ Dosage changed; exact values omitted.
 
 ### 4.2 Selection Rollout
 
-一个 task 由 SGLang 上的 policy model 生成 N 个 selection。每个 selection 是一个 span state map：`HIDDEN / SUMMARY / RAW`。首版不做 GRPO advantage，N 次采样主要用于产生 on-policy 训练状态和 correct/wrong answer 对比。
+一个 task 由 SGLang 上的 policy model 生成 N 个 selection。每个 selection 是一个 span state map：`EXPAND / SUMMARY / HIDDEN`。首版不做 GRPO advantage，N 次采样主要用于产生 on-policy 训练状态和 correct/wrong answer 对比。
 
 ```json
 {
@@ -300,10 +300,10 @@ Dosage changed; exact values omitted.
   "selection_prompt": "Question: ...\nSpan summaries: ...\nReturn span states.",
   "span_states": [
     {"span_id": "doc1_sent1", "state": "SUMMARY"},
-    {"span_id": "doc4_sent2", "state": "RAW"},
+    {"span_id": "doc4_sent2", "state": "EXPAND"},
     {"span_id": "doc9_sent3", "state": "HIDDEN"}
   ],
-  "selection_text": "{\"doc1_sent1\":\"SUMMARY\",\"doc4_sent2\":\"RAW\",\"doc9_sent3\":\"HIDDEN\"}",
+  "selection_text": "{\"doc1_sent1\":\"SUMMARY\",\"doc4_sent2\":\"EXPAND\",\"doc9_sent3\":\"HIDDEN\"}",
   "policy_logprobs": [-0.12, -0.37, -0.08]
 }
 ```
@@ -311,7 +311,7 @@ Dosage changed; exact values omitted.
 状态映射：
 
 ```text
-RAW     -> render raw_text
+EXPAND  -> render raw_text
 SUMMARY -> render summary_text
 HIDDEN  -> omit span
 ```
@@ -339,7 +339,7 @@ selection 经过 renderer 拼接成 answer prompt，再交给 SGLang 上的主�
 
 ### 4.4 Budget Allocation Record
 
-per-span state 只是 policy 输出，最终 prompt 由 budget allocator 统一裁决。这样可以处理多个 span 同时想 `RAW` 但预算不足的情况。
+per-span state 只是 policy 输出，最终 prompt 由 budget allocator 统一裁决。这样可以处理多个 span 同时想 `EXPAND` 但预算不足的情况。
 
 ```json
 {
@@ -350,7 +350,7 @@ per-span state 只是 policy 输出，最终 prompt 由 budget allocator 统一�
   "candidate_decisions": [
     {
       "span_id": "doc4_sent2",
-      "policy_state": "RAW",
+      "policy_state": "EXPAND",
       "raw_logit": 4.2,
       "summary_logit": 1.7,
       "hidden_logit": -0.4,
@@ -361,7 +361,7 @@ per-span state 只是 policy 输出，最终 prompt 由 budget allocator 统一�
     }
   ],
   "final_actions": [
-    {"span_id": "doc4_sent2", "state": "RAW"}
+    {"span_id": "doc4_sent2", "state": "EXPAND"}
   ],
   "budget_used": 3180,
   "budget_violation": false
@@ -372,15 +372,15 @@ per-span state 只是 policy 输出，最终 prompt 由 budget allocator 统一�
 
 | Allocator | 用途 |
 |---|---|
-| `greedy_margin_per_cost` | 默认实现，按 `RAW` over `SUMMARY` margin / upgrade cost 排序。 |
+| `greedy_margin_per_cost` | 默认实现，按 `EXPAND` over `SUMMARY` margin / upgrade cost 排序。 |
 | `knapsack_analysis` | 小规模分析用，用 policy logits 做 utility、token cost 做 weight。 |
 
 失败条件：
 
 ```text
 budget_used > token_budget
-final state not in RAW/SUMMARY/HIDDEN
-RAW selected but raw_text missing
+final state not in EXPAND/SUMMARY/HIDDEN
+EXPAND selected but raw_text missing
 SUMMARY selected but summary_text missing
 ```
 
@@ -397,13 +397,13 @@ Review-SFT target 是第一条训练路线。reviewer 读取正确答案、错�
   "span_id": "doc4_sent2",
   "source_id": "hotpotqa_doc4_sent2",
   "student_state": "SUMMARY",
-  "target_state": "RAW",
+  "target_state": "EXPAND",
   "label_source": "review_sft",
   "quoted_summary": "Dosage changed; exact values omitted.",
   "quoted_raw": "Dosage changed from 5mg to 50mg.",
   "wrong_answer": "5mg",
   "correct_answer": "50mg",
-  "verifiable_reason": "The answer requires the omitted exact value, so this span should be RAW instead of SUMMARY.",
+  "verifiable_reason": "The answer requires the omitted exact value, so this span should be EXPAND instead of SUMMARY.",
   "contrast_selection_id": "hotpotqa_0001_sel01",
   "accepted_for_training": true
 }
@@ -412,7 +412,7 @@ Review-SFT target 是第一条训练路线。reviewer 读取正确答案、错�
 进入训练的 target 必须满足：
 
 ```text
-target_state in RAW/SUMMARY/HIDDEN
+target_state in EXPAND/SUMMARY/HIDDEN
 quoted_summary non-empty
 verifiable_reason non-empty
 source_id traceable
@@ -427,8 +427,8 @@ accepted_for_training = true
 
 ```json
 {
-  "prompt": "Question: ...\nCandidate summary: Dosage changed; exact values omitted.\nWrong answer: 5mg\nCorrect answer: 50mg\nChoose one state: RAW, SUMMARY, HIDDEN.",
-  "response": "{\"state\":\"RAW\"}",
+  "prompt": "Question: ...\nCandidate summary: Dosage changed; exact values omitted.\nWrong answer: 5mg\nCorrect answer: 50mg\nChoose one state: EXPAND, SUMMARY, HIDDEN.",
+  "response": "{\"state\":\"EXPAND\"}",
   "metadata": {
     "task_id": "hotpotqa_0001",
     "selection_id": "hotpotqa_0001_sel02",
@@ -436,7 +436,7 @@ accepted_for_training = true
     "span_id": "doc4_sent2",
     "source_id": "hotpotqa_doc4_sent2",
     "label_source": "review_sft",
-    "target_state": "RAW",
+    "target_state": "EXPAND",
     "summary_tokens": 12,
     "raw_tokens": 31,
     "upgrade_cost": 19,
@@ -469,9 +469,9 @@ OPD-style distillation 是第二条训练路线。它不只是 reviewer 给一�
   "policy_checkpoint": "checkpoints/selection_policy_iter02",
   "student_selection_prompt": "Question: ...\nSpan summaries: ...\nReturn span states.",
   "student_selection_text": "{\"doc1_sent1\":\"SUMMARY\",\"doc4_sent2\":\"SUMMARY\"}",
-  "hindsight_suffix": "The model answered 5mg, but the correct answer is 50mg. The summary said exact values were omitted, so doc4_sent2 should be RAW.",
+  "hindsight_suffix": "The model answered 5mg, but the correct answer is 50mg. The summary said exact values were omitted, so doc4_sent2 should be EXPAND.",
   "teacher_prompt": "Question: ...\nSpan summaries: ...\nStudent selection: ...\nAnswer outcome: wrong...\nRationale: ...\nReturn corrected span states.",
-  "teacher_selection_text": "{\"doc1_sent1\":\"SUMMARY\",\"doc4_sent2\":\"RAW\"}",
+  "teacher_selection_text": "{\"doc1_sent1\":\"SUMMARY\",\"doc4_sent2\":\"EXPAND\"}",
   "teacher_logprobs": null,
   "distill_mode": "ce_fallback",
   "accepted_for_distillation": true
@@ -540,7 +540,7 @@ held-out test records never include gold answer in review fields
   "span_id": "doc4_sent2",
   "source_id": "hotpotqa_doc4_sent2",
   "student_state": "SUMMARY",
-  "target_state": "RAW",
+  "target_state": "EXPAND",
   "reviewer_mode": "self_snapshot",
   "review_context": {
     "summary_view": "Dosage changed; exact values omitted.",
@@ -610,7 +610,7 @@ review uses train/validation gold only, never held-out test gold
 
 3. Selection on SGLang by current policy π_t:
    input = question + span summary + budget state
-   output = RAW / SUMMARY / HIDDEN for each span
+   output = EXPAND / SUMMARY / HIDDEN for each span
    repeat N times for the same task to get multiple selection candidates
 
 4. Budget-aware renderer:
@@ -731,7 +731,7 @@ data/disclosure/selections_train.jsonl
 ```text
 same task has N selection ids
 each selection has complete span state map
-state in RAW/SUMMARY/HIDDEN
+state in EXPAND/SUMMARY/HIDDEN
 selection prompt and policy response are saved for OPD
 policy backend is SGLang in official runs
 rule/random policies are only bootstrap baselines
@@ -770,7 +770,7 @@ allocation_trace
 ```text
 1. reserve system/task prompt tokens
 2. include high-confidence SUMMARY spans when possible
-3. rank RAW upgrades by margin(RAW, SUMMARY) / upgrade_cost
+3. rank EXPAND upgrades by margin(EXPAND, SUMMARY) / upgrade_cost
 4. apply upgrades while budget remains
 5. keep low-confidence or over-budget spans HIDDEN
 ```
@@ -918,7 +918,7 @@ original selection prompt
 + original policy selection result
 + answer result
 + correct answer
-+ rationale: why these spans should be RAW/SUMMARY/HIDDEN
++ rationale: why these spans should be EXPAND/SUMMARY/HIDDEN
 -> hindsight teacher / policy-review mode
 -> CE fallback or teacher-logprob OPD distillation
 ```
@@ -990,7 +990,7 @@ data/slime/selection_validation.jsonl
 
 ```text
 response parses as JSON
-state in RAW/SUMMARY/HIDDEN
+state in EXPAND/SUMMARY/HIDDEN
 metadata includes task_id/span_id/source_id/label_source
 metadata includes token_budget/summary_tokens/raw_tokens/upgrade_cost
 metadata includes policy_iteration/policy_checkpoint/selection_id/answer_id for on-policy records
@@ -1112,7 +1112,7 @@ Killer experiment 2：
 same selected spans
 same summaries
 same token budget
-compare: SUMMARY-only rendering vs RAW rendering vs learned mixed selection
+compare: SUMMARY-only rendering vs EXPAND rendering vs learned mixed selection
 ```
 
 主结果表：
@@ -1120,7 +1120,7 @@ compare: SUMMARY-only rendering vs RAW rendering vs learned mixed selection
 | Method | HotpotQA EM/F1 | 2Wiki EM/F1 | Qasper F1 | Evidence recall | Token budget |
 |---|---:|---:|---:|---:|---:|
 | Summary-only | TBD | TBD | TBD | TBD | TBD |
-| Full raw / top-k raw | TBD | TBD | TBD | TBD | TBD |
+| Full original / top-k original | TBD | TBD | TBD | TBD | TBD |
 | BM25 / frozen dense top-k | TBD | TBD | TBD | TBD | TBD |
 | LLMLingua / LongLLMLingua | TBD | TBD | TBD | TBD | TBD |
 | ReSP-style control | TBD | TBD | TBD | TBD | TBD |
@@ -1153,7 +1153,7 @@ train Qasper -> test HotpotQA
 
 自训练迭代曲线：
 
-| Iteration | Training route | Accepted targets | Answer EM/F1 | Evidence recall | Missed RAW | Token budget |
+| Iteration | Training route | Accepted targets | Answer EM/F1 | Evidence recall | Missed EXPAND | Token budget |
 |---:|---|---:|---:|---:|---:|---:|
 | 0 | bootstrap | TBD | TBD | TBD | TBD | TBD |
 | 1 | Review-SFT | TBD | TBD | TBD | TBD | TBD |
@@ -1223,7 +1223,7 @@ teacher_topk_indices optional
 ```text
 response_length <= 0
 loss_mask sum != response_length
-target_state not in RAW/SUMMARY/HIDDEN
+target_state not in EXPAND/SUMMARY/HIDDEN
 missing task_id/span_id/source_id
 missing budget metadata
 missing selection_id or answer_id
@@ -1254,7 +1254,7 @@ test_disclosure_metrics.py
 关键断言：
 
 ```text
-RAW / SUMMARY / HIDDEN parser works
+EXPAND / SUMMARY / HIDDEN parser works
 renderer maps span states deterministically
 budget allocator never exceeds budget
 greedy allocator deterministic
@@ -1371,7 +1371,7 @@ tests/test_disclosure_metrics.py
 |---|---|
 | memory item | context span |
 | visibility | disclosure |
-| EXPAND / KEEP / DROP in engineering code | RAW / SUMMARY / HIDDEN span states |
+| RAW / SUMMARY / HIDDEN in earlier draft | EXPAND / SUMMARY / HIDDEN span actions |
 | useful information | expansion-worthy evidence |
 | self-distillation as paper identity | on-policy distillation as training mechanism |
 | memory manager | selection policy |
