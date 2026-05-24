@@ -1,0 +1,41 @@
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Local environments
+.codex_tmp/
+.venv/
+venv/
+env/
+.deb
+
+# Large model/training artifacts
+models/
+checkpoints/
+research-automation/slime-context-manager/data/
+research-automation/slime-context-manager/checkpoints/
+research-automation/slime-context-manager/models/
+research-automation/slime-context-manager/runs/
+*.jsonl
+*.parquet
+*.arrow
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.whl
+
+# Optional downloaded benchmark caches
+research-automation/slime-context-manager/data/raw/hotpotqa_*.jsonl
+research-automation/slime-context-manager/data/processed/**/hf_dataset/
+
+# Local logs
+*.log
+research-automation/slime-context-manager/DeepEP/
+research-automation/slime-context-manager/apex/
+research-automation/slime-context-manager/sglang/
+*.deb
+*.distcp

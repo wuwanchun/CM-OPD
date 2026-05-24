@@ -1,0 +1,7 @@
+# Optional heavy training stack. Install only on the training machine.
+# The THUDM/slime project evolves quickly; pin a commit in real experiments.
+git+https://github.com/THUDM/slime.git
+sglang>=0.4.0
+ray>=2.9.0
+ninja>=1.11.0
+packaging>=24.0

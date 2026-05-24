@@ -1,0 +1,6 @@
+model_name_or_path: Qwen/Qwen2.5-0.5B-Instruct
+local_dir: models/qwen2_5_0_5b_instruct
+dtype: auto
+trust_remote_code: true
+max_new_tokens: 128
+temperature: 0.0

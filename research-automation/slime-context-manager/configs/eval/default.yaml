@@ -1,0 +1,16 @@
+prediction_action_key: pred_action
+gold_action_key: gold_action
+must_preserve_actions:
+  - KEEP
+  - COMPRESS
+  - RETRIEVE
+  - PIN
+preserve_actions:
+  - KEEP
+  - COMPRESS
+  - ARCHIVE
+  - RETRIEVE
+  - UPDATE
+  - PIN
+dangerous_actions:
+  - DROP
